@@ -54,12 +54,38 @@ describe("rule matching", () => {
 
   it("a leading * opts an allow rule out of anchoring", () => {
     const rule: Rule = { action: "allow", tools: ["bash"], pattern: "*ls*" };
-    expect(ruleMatches(rule, "bash", { command: "cd /opt && ls -la" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "xargs ls" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "cd /opt && grep x" }, HOME)).toBe(false);
   });
 
   it("deny rules stay unanchored so they catch exfiltration mid-command", () => {
     const rule: Rule = { action: "deny", pattern: "~/creds" };
     expect(ruleMatches(rule, "bash", { command: "tar czf backup.tgz ~/creds" }, HOME)).toBe(true);
+  });
+
+  it("a chained command splits into components; an allow needs every component to match", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "ls *" };
+    expect(ruleMatches(rule, "bash", { command: "ls /a && ls /b" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "ls /a && rm -rf /b" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "ls /a | grep x" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "ls /a & rm -rf /" }, HOME)).toBe(false);
+  });
+
+  it("a deny matches if any component of a chain matches", () => {
+    const rule: Rule = { action: "deny", pattern: "~/creds" };
+    expect(ruleMatches(rule, "bash", { command: "ls /a && cat ~/creds" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "ls /a && cat ~/notes" }, HOME)).toBe(false);
+  });
+
+  it("quoted separators are not chain separators", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "ls *" };
+    expect(ruleMatches(rule, "bash", { command: 'ls "a && b"' }, HOME)).toBe(true);
+  });
+
+  it("command substitution defeats an allow rule and falls to the model gate", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "ls *" };
+    expect(ruleMatches(rule, "bash", { command: "ls $(rm -rf /)" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "ls `rm -rf /`" }, HOME)).toBe(false);
   });
 
   it("matchRules returns the first hit in order", () => {

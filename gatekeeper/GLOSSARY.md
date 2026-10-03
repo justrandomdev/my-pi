@@ -40,6 +40,10 @@ _Avoid_: permission, whitelist entry
 A path or glob whose contents must not be read, modified, or exfiltrated.
 _Avoid_: blocked file, restricted file
 
+**Chain**:
+A shell command joined by separators (`&&`, `||`, `;`, `|`, `&`); rules evaluate it component by component, quotes respected.
+_Avoid_: compound command, command line
+
 **State**:
 The payload sent to the model for classification: tool name, arguments, and the current task.
 _Avoid_: prompt, context
