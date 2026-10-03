@@ -57,7 +57,9 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
   endpoint: {
     baseUrl: "http://localhost:11434",
     model: "clef-flash",
-    timeoutMs: 5000,
+    // Cold-start load of a large local model can take tens of seconds;
+    // warm calls are sub-second. keep_alive keeps the model warm between calls.
+    timeoutMs: 30_000,
     keepAlive: "10m",
   },
   policy: DEFAULT_POLICY,

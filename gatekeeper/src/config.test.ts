@@ -8,6 +8,7 @@ describe("config resolution", () => {
     expect(DEFAULT_CONFIG.floors).toEqual({ bash: true, powershell: true, edit: true, write: true });
     expect(DEFAULT_CONFIG.endpoint.baseUrl).toBe("http://localhost:11434");
     expect(DEFAULT_CONFIG.endpoint.model).toBe("clef-flash");
+    expect(DEFAULT_CONFIG.endpoint.timeoutMs).toBe(30_000);
     expect(DEFAULT_CONFIG.failMode).toBe("ask");
     expect(DEFAULT_CONFIG.log).toEqual({
       level: "user",
