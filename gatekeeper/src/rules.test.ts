@@ -45,12 +45,29 @@ describe("rule matching", () => {
     expect(ruleMatches(rule, "web_fetch", { urls: ["https://example.com"] }, HOME)).toBe(false);
   });
 
+  it("allow rules on shell commands anchor to the command start, with * crossing everything", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "ls *" };
+    expect(ruleMatches(rule, "bash", { command: "ls /home/op/code && ls /home/op/code/other 2>/dev/null" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "cat notes && ls /a" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "rm -rf / && ls" }, HOME)).toBe(false);
+  });
+
+  it("a leading * opts an allow rule out of anchoring", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "*ls*" };
+    expect(ruleMatches(rule, "bash", { command: "cd /opt && ls -la" }, HOME)).toBe(true);
+  });
+
+  it("deny rules stay unanchored so they catch exfiltration mid-command", () => {
+    const rule: Rule = { action: "deny", pattern: "~/creds" };
+    expect(ruleMatches(rule, "bash", { command: "tar czf backup.tgz ~/creds" }, HOME)).toBe(true);
+  });
+
   it("matchRules returns the first hit in order", () => {
     const rules: Rule[] = [
       { action: "allow", tools: ["bash"], pattern: "~/work/**" },
       { action: "deny", pattern: "~/work/**" },
     ];
-    expect(matchRules(rules, "bash", { command: "ls ~/work/src" }, HOME)?.action).toBe("allow");
+    expect(matchRules(rules, "bash", { command: "~/work/bin/run --all" }, HOME)?.action).toBe("allow");
     expect(matchRules(rules, "read", { path: "/home/op/work/src/a.ts" }, HOME)?.action).toBe("deny");
   });
 

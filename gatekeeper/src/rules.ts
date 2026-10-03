@@ -10,8 +10,11 @@ export interface Rule {
   tools?: string[];
   /** path/argument glob; omit for any arguments. `~` expands to home.
    *  File tools match against their path target (anchored, full match).
-   *  Shell commands match content-wide across the whole command text.
-   *  Other tools match content-wide over their serialized arguments. */
+   *  Shell commands and other tools match over their text/serialized
+   *  arguments, asymmetrically for safety: `allow` rules anchor to the
+   *  start of the text (a leading `*` opts out), and `*`/`**` cross
+   *  everything; `deny` rules search the whole text so they catch
+   *  exfiltration anywhere in a command. */
   pattern?: string;
   reason?: string;
 }
@@ -54,9 +57,20 @@ function matchesTarget(pattern: string, target: string, home: string): boolean {
   return new RegExp(`^${source}$`).test(expandHome(target, home));
 }
 
-function matchesContent(pattern: string, text: string, home: string): boolean {
-  const source = globToRegexSource(normalizePattern(pattern, home));
-  const regex = new RegExp(source);
+/** Content globs: `*` and `**` cross everything (spaces, slashes, &&). */
+function contentGlobToRegexSource(pattern: string): string {
+  return escapeRegex(pattern)
+    .replace(/\*\*/g, ".*")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+}
+
+function matchesContent(pattern: string, text: string, home: string, action: Rule["action"]): boolean {
+  const source = contentGlobToRegexSource(normalizePattern(pattern, home));
+  // Allows anchor to the start of the text (a leading * opts out);
+  // denies search anywhere so nothing hides mid-command.
+  const anchored = action === "allow" && !pattern.startsWith("*");
+  const regex = new RegExp(anchored ? `^${source}` : source);
   return regex.test(expandHome(text, home));
 }
 
@@ -78,7 +92,7 @@ export function ruleMatches(rule: Rule, tool: string, args: Record<string, unkno
     if (typeof target !== "string") return false;
     return matchesTarget(rule.pattern, target, home);
   }
-  return matchesContent(rule.pattern, argsText(tool, args), home);
+  return matchesContent(rule.pattern, argsText(tool, args), home, rule.action);
 }
 
 /** First matching rule in order, or undefined. */
