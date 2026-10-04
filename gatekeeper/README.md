@@ -25,8 +25,8 @@ Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`fa
 - **Manual edits are human actions** — your editor is outside the gate.
 - **Remote endpoints are data egress**: configuring a remote clef/Jev endpoint sends every gated call's tool name, arguments, and current task to that service (ADR-0002). Local-first is the default.
 - Residual: editing gatekeeper's *source* in a dev repo isn't covered by self-protection; it relies on the `edit`/`write` ask floors and operator review.
-- Residual: self-protection matches literal, `$HOME`-expanded, and dot-segment-normalized paths in shell text — encoded or obfuscated path spellings fall through to the model gate rather than being denied outright.
-- Residual: the decision log records command arguments (truncated). A secret passed inside a command (`curl -H "Authorization: Bearer …"`) lands in `decisions.jsonl` — keep the log's directory private, and rotate it with `log.retentionDays`.
+- Residual: self-protection matches literal, `$HOME`-expanded, and dot-segment-normalized paths in shell text — encoded or obfuscated path spellings fall through to the model gate rather than being denied outright. The static `cd`-into-gate check tracks `cd` chains across the components of a shell chain (so `cd ~ && cd .pi/agent/gate` is caught) but does not track shell variables or dynamic paths — those still fall through to the model gate.
+- Residual: the decision log records command arguments (truncated). A secret passed inside a command (`curl -H "Authorization: Bearer …"`) lands in `decisions.jsonl` — the gate creates the log directory with mode `0o700` so other local users can't read it, and rotates with `log.retentionDays`.
 
 ## Manual configuration
 
@@ -82,6 +82,7 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 | `failMode` | `"ask"` | Model down/timeout: `"ask"` routes to the operator, `"block"` denies (headless). |
 | `cache` | `true` | Session decision cache, keyed by tool + arguments + task. |
 | `stateBudgetChars` | `4000` | Character cap on what the model sees. |
+| `notify` | `"always"` | Transparency-line verbosity: `"always"` notifies every decision; `"summary"` notifies only blocks/asks; `"off"` suppresses all notifications. The decision log is unaffected. |
 | `log.level` | `"user"` | Where the decision log lives: `~/.pi/agent/gate/` or `.pi/gate/`. One active log. |
 | `log.maxLines` | `10000` | Rotate after this many lines. |
 | `log.keepFiles` | `10` | Rotated files kept (`decisions.jsonl.1` … `.10`). |
@@ -158,7 +159,7 @@ Shows the effective posture: enabled, endpoint (model @ baseUrl), threshold, flo
 /gate:log 20 bash        last 20 bash decisions
 ```
 
-Every decision is also shown live as a one-line transparency notification, auto-allows included.
+Every decision is also shown live as a one-line transparency notification (default `notify: "always"`); set `notify: "summary"` to silence auto-allow notifications, or `notify: "off"` to suppress transparency entirely. Auto-allows are still recorded in the decision log regardless.
 
 ## Model endpoints
 

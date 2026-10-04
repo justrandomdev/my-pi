@@ -278,4 +278,110 @@ describe("gatekeeper extension", () => {
     const allowed = await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: join(userHome, "creds") } }, { isProjectTrusted: () => true });
     expect(allowed).toBeUndefined();
   });
+
+  it("set endpoint.apiKey redacts the value in the notify so the secret doesn't leak", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:config")!.handler;
+    const ctx = env.ctx();
+    await handler("set endpoint.apiKey super-secret-token", ctx);
+    // the value must not appear in any notify
+    expect(env.ui.notified.some((n) => n.includes("super-secret-token"))).toBe(false);
+    // ...but it does appear as "***" in the success line
+    expect(env.ui.notified.some((n) => n.includes("endpoint.apiKey = ***"))).toBe(true);
+    // ...and the actual value landed in the config file
+    const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg.endpoint.apiKey).toBe("super-secret-token");
+  });
+
+  it("set log.maxLines / log.keepFiles / log.retentionDays / log.truncateArgsBytes and stateBudgetChars actually write", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:config")!.handler;
+    const ctx = env.ctx();
+    for (const args of [
+      "set log.maxLines 5000",
+      "set log.keepFiles 5",
+      "set log.retentionDays 7",
+      "set log.truncateArgsBytes 1024",
+      "set stateBudgetChars 2000",
+    ]) {
+      await handler(args, ctx);
+    }
+    const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg.log.maxLines).toBe(5000);
+    expect(cfg.log.keepFiles).toBe(5);
+    expect(cfg.log.retentionDays).toBe(7);
+    expect(cfg.log.truncateArgsBytes).toBe(1024);
+    expect(cfg.stateBudgetChars).toBe(2000);
+    // and not as stray top-level dotted keys (the bug we fixed)
+    expect(cfg["log.maxLines"]).toBeUndefined();
+    expect(cfg["log.keepFiles"]).toBeUndefined();
+    expect(cfg["log.retentionDays"]).toBeUndefined();
+    expect(cfg["log.truncateArgsBytes"]).toBeUndefined();
+  });
+
+  it("set log.level rejects values that are not user|project", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:config")!.handler;
+    const ctx = env.ctx();
+    await handler("set log.level foo", ctx);
+    expect(env.ui.notified.some((n) => n.includes("must be"))).toBe(true);
+  });
+
+  it("--project writes are blocked when project trust is not granted", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:rules")!.handler;
+    const ctx = env.ctx(); // isProjectTrusted: () => false
+    await handler("add deny \"~/test\" --project", ctx);
+    // the project file should not exist
+    const projectCfg = join(projectDir, ".pi/gate/config.json");
+    let exists = true;
+    try {
+      await stat(projectCfg);
+    } catch {
+      exists = false;
+    }
+    expect(exists).toBe(false);
+    // ...and the operator was warned
+    expect(env.ui.notified.some((n) => n.includes("project trust"))).toBe(true);
+  });
+
+  it("add allow '*' warns and requires explicit confirmation; aborts without it", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:rules")!.handler;
+    const ctx = env.ctx();
+    ctx.ui.confirm = async (): Promise<boolean> => false; // operator declines
+    await handler("add allow \"*\"", ctx);
+    const cfgPath = join(userHome, ".pi/agent/gate/config.json");
+    let wroteRule = false;
+    try {
+      const cfg = JSON.parse(await readFile(cfgPath, "utf8"));
+      wroteRule = (cfg.rules ?? []).some((r: any) => r.pattern === "*");
+    } catch {
+      // no file at all — also fine
+    }
+    expect(wroteRule).toBe(false);
+    expect(env.ui.notified.some((n) => n.includes("aborted"))).toBe(true);
+  });
+
+  it("add allow '*' with confirm=true writes the wide-open rule", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:rules")!.handler;
+    const ctx = env.ctx();
+    ctx.ui.confirm = async (): Promise<boolean> => true; // operator confirms
+    await handler("add allow \"*\"", ctx);
+    const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg.rules).toContainEqual({ action: "allow", pattern: "*" });
+  });
 });

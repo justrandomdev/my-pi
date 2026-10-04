@@ -127,14 +127,45 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     return "deny";
   }
 
-  /** Write a scoped config file, creating it if needed. */
+  /** Tokenize a slash-command argument string: strips whitespace, recognizes
+   *  `--project`, returns the target level and the remaining parts. Each
+   *  remaining part has matching surrounding quotes stripped, so
+   *  `add allow "*"` and `add allow *` produce the same pattern. */
+  function parseCmdArgs(raw: string): { level: "user" | "project"; parts: string[] } {
+    const parts = raw.trim().split(/\s+/).filter(Boolean);
+    const level: "user" | "project" = parts.includes("--project") ? "project" : "user";
+    return {
+      level,
+      parts: parts.filter((p) => p !== "--project").map(stripEnclosingQuotes),
+    };
+  }
+
+  function stripEnclosingQuotes(text: string): string {
+    if (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
+      return text.slice(1, -1);
+    }
+    return text;
+  }
+
+  /** Write a scoped config file, creating it if needed. Project-level writes
+   *  require trust; user-level writes don't. The ctx is supplied so the gate
+   *  can check it (and report blocks) where the caller's ctx isn't available. */
   async function writeScoped(
     level: "user" | "project",
     mutate: (scoped: DeepPartial<GatekeeperConfig>) => void,
     cwd: string,
+    ctx: AnyCtx | undefined,
   ): Promise<void> {
-    const trusted = true;
-    const scoped = await readScoped(trusted, cwd);
+    const trusted = ctx?.isProjectTrusted() ?? currentCtx?.isProjectTrusted() ?? false;
+    if (level === "project" && !trusted) {
+      const notify = ctx?.ui.notify ?? currentCtx?.ui.notify;
+      notify?.(
+        "gate › --project writes are blocked until you grant project trust for the repo",
+        "warning",
+      );
+      return;
+    }
+    const scoped = await readScoped(true, cwd);
     const target = scoped[level] ?? {};
     mutate(target);
     scoped[level] = target;
@@ -161,11 +192,13 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           // logging must never break the gate
         });
     },
-    addGrant: (rule: Rule) => {
+    addGrant: async (rule: Rule): Promise<void> => {
       const cwd = currentCtx?.cwd ?? process.cwd();
-      void writeScoped("user", (scoped) => {
+      // The gate decides whether the write is allowed; the caller (decision
+      // layer) handles failures so the operator sees them.
+      await writeScoped("user", (scoped) => {
         scoped.rules = [...(scoped.rules ?? []), rule];
-      }, cwd);
+      }, cwd, undefined);
     },
   };
 
@@ -217,39 +250,54 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     description: "Manage rules: list (default), add <allow|deny> <pattern> [--tool <t>] [--project], rm <u#|p#>, test <tool> [json-args]",
     handler: async (args: string, ctx: AnyCtx) => {
       await refreshConfig(ctx);
-      const parts = args.trim().split(/\s+/).filter(Boolean);
-      const clean = parts.filter((p) => p !== "--project");
+      const { level, parts: clean } = parseCmdArgs(args);
 
       if (clean[0] === "add" && (clean[1] === "allow" || clean[1] === "deny") && clean[2]) {
-        const level = parts.includes("--project") ? "project" : "user";
-        const rule: Rule = { action: clean[1], pattern: clean[2] };
+        const pattern = clean[2];
+        // A bare `*` or `**` matches every argument — a wide-open rule. Warn
+        // and require explicit confirmation, but allow it if the operator
+        // confirms. The default confirm returns false.
+        if (pattern === "*" || pattern === "**") {
+          ctx.ui.notify(
+            `gate › pattern "${pattern}" matches every argument — this is a wide-open ${clean[1]} rule`,
+            "warning",
+          );
+          const proceed = await ctx.ui.confirm?.(
+            `gate › write the ${clean[1]} rule with pattern "${pattern}"?`,
+          );
+          if (!proceed) {
+            ctx.ui.notify(`gate › rule add aborted`, "info");
+            return;
+          }
+        }
+        const rule: Rule = { action: clean[1], pattern };
         const toolFlag = clean.indexOf("--tool");
         if (toolFlag !== -1 && clean[toolFlag + 1]) rule.tools = [clean[toolFlag + 1]];
         await writeScoped(level, (scoped) => {
           scoped.rules = [...(scoped.rules ?? []), rule];
-        }, ctx.cwd);
+        }, ctx.cwd, ctx);
         ctx.ui.notify(`gate › added ${rule.action} rule at ${level} level: ${rule.pattern}`, "info");
         return;
       }
 
       if (clean[0] === "rm" && clean[1]) {
         const ref = clean[1];
-        const level = ref.startsWith("p") ? "project" : "user";
+        const rmLevel = ref.startsWith("p") ? "project" : "user";
         const index = (Number(ref.match(/\d+$/)?.[0] ?? 0) || 0) - 1;
         const scoped = await readScoped(true, ctx.cwd);
-        const removed = scoped[level]?.rules?.[index];
+        const removed = scoped[rmLevel]?.rules?.[index];
         if (!removed) {
-          ctx.ui.notify(`gate › no rule ${ref} at ${level} level`, "warning");
+          ctx.ui.notify(`gate › no rule ${ref} at ${rmLevel} level`, "warning");
           return;
         }
         const signature = JSON.stringify(removed);
-        await writeScoped(level, (s) => {
+        await writeScoped(rmLevel, (s) => {
           // Remove by deep equality inside the read-modify-write, so a
           // rule added between listing and removal survives.
           const rules = s.rules ?? [];
           const at = rules.findIndex((r) => JSON.stringify(r) === signature);
           s.rules = at === -1 ? rules : rules.filter((_, i) => i !== at);
-        }, ctx.cwd);
+        }, ctx.cwd, ctx);
         ctx.ui.notify(`gate › removed ${removed.action} rule: ${removed.pattern ?? "(tool rule)"}`, "info");
         return;
       }
@@ -292,23 +340,38 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     description: "Show config, or set <key> <value> [--project]",
     handler: async (args: string, ctx: AnyCtx) => {
       await refreshConfig(ctx);
-      const parts = args.trim().split(/\s+/).filter(Boolean);
-      const level = parts.includes("--project") ? "project" : "user";
-      const clean = parts.filter((p) => p !== "--project");
+      const { level, parts: clean } = parseCmdArgs(args);
 
       if (clean[0] === "set" && clean[1] && clean[2] !== undefined) {
         const [, key, ...rest] = clean;
         const value = rest.join(" ");
+        // Validate before writing so a bad value doesn't half-overwrite the file.
+        if (key === "log.level" && value !== "user" && value !== "project") {
+          ctx.ui.notify(`gate › log.level must be "user" or "project", got "${value}"`, "warning");
+          return;
+        }
+        if (key === "failMode" && value !== "ask" && value !== "block") {
+          ctx.ui.notify(`gate › failMode must be "ask" or "block", got "${value}"`, "warning");
+          return;
+        }
         const parse = (): unknown => {
           if (value === "true" || value === "false") return value === "true";
-          if (key === "threshold" || key === "endpoint.timeoutMs") return Number(value);
-          if (key === "policy" || key === "failMode" || key === "log.level" || key.startsWith("endpoint.")) return value;
+          if (
+            key === "threshold" || key === "stateBudgetChars" || key === "endpoint.timeoutMs" ||
+            (key.startsWith("log.") && key !== "log.level")
+          ) return Number(value);
+          if (
+            key === "policy" || key === "failMode" || key === "log.level" ||
+            key.startsWith("endpoint.")
+          ) return value;
           return Number.isNaN(Number(value)) ? value : Number(value);
         };
         const parsed = parse();
         await writeScoped(level, (scoped) => {
           if (key === "log.level") {
             scoped.log = { ...DEFAULT_CONFIG.log, ...(scoped.log ?? {}), level: value as "user" | "project" };
+          } else if (key.startsWith("log.")) {
+            scoped.log = { ...DEFAULT_CONFIG.log, ...(scoped.log ?? {}), [key.slice("log.".length)]: parsed as number };
           } else if (key.startsWith("endpoint.")) {
             scoped.endpoint = {
               ...DEFAULT_CONFIG.endpoint,
@@ -321,11 +384,16 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
               ...(scoped.floors ?? {}),
               [key.slice("floors.".length)]: parsed as boolean,
             };
+          } else if (key === "stateBudgetChars") {
+            scoped.stateBudgetChars = parsed as number;
           } else {
             (scoped as Record<string, unknown>)[key] = parsed;
           }
-        }, ctx.cwd);
-        ctx.ui.notify(`gate › set ${key} = ${value} at ${level} level`, "info");
+        }, ctx.cwd, ctx);
+        // Redact secrets in the echo so apiKey doesn't leak into notifications
+        // (which can persist in TUI history or breadcrumbs).
+        const echo = key === "endpoint.apiKey" ? "***" : value;
+        ctx.ui.notify(`gate › set ${key} = ${echo} at ${level} level`, "info");
         return;
       }
 

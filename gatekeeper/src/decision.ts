@@ -54,7 +54,7 @@ export interface GateDeps {
   askOperator(prompt: OperatorPromptInfo): Promise<"allow-once" | "allow-always" | "deny" | "no-ui">;
   notify(line: string): void;
   writeLog(record: LogRecord): void;
-  addGrant(rule: Rule): void;
+  addGrant(rule: Rule): Promise<void>;
 }
 
 export interface Gate {
@@ -82,7 +82,13 @@ export function createGate(deps: GateDeps): Gate {
           decision.classification !== undefined
             ? `${decision.classification}${decision.confidence !== undefined ? ` (${decision.confidence.toFixed(2)})` : ""}`
             : decision.source;
-        deps.notify(`gate › ${tool}: ${label} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
+        // The notify knob: `off` skips every notification; `summary` keeps
+        // blocks/asks and skips allows; `always` notifies every decision.
+        const skipNotify =
+          config.notify === "off" || (config.notify === "summary" && decision.action === "allow");
+        if (!skipNotify) {
+          deps.notify(`gate › ${tool}: ${label} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
+        }
         deps.writeLog({
           tool,
           args: argsSummary,
@@ -107,7 +113,13 @@ export function createGate(deps: GateDeps): Gate {
         });
       }
 
-      if (!config.enabled) return { action: "allow", source: "disabled" };
+      if (!config.enabled) {
+        return finish({
+          action: "allow",
+          source: "disabled",
+          reason: "gate is disabled; pass-through without classification or operator review",
+        });
+      }
 
       // Layer 1: static rules. First hit wins; no model call.
       const rule = matchRules(config.rules, tool, args, deps.home);
@@ -125,6 +137,7 @@ export function createGate(deps: GateDeps): Gate {
       }
 
       // Layer 3+ decisions are cacheable; rule hits are not (they never re-classify).
+      // `finish` notifies + logs; `settle` adds the cache layer on top.
       const settle = (decision: Decision): Decision => {
         if (config.cache) sessionCache.set(cacheKey, decision);
         return finish(decision);
@@ -191,7 +204,18 @@ export function createGate(deps: GateDeps): Gate {
       if (outcome === "allow-always") {
         const pattern = grantPattern(tool, args);
         if (pattern) {
-          deps.addGrant({ action: "allow", tools: [tool], pattern });
+          try {
+            await deps.addGrant({ action: "allow", tools: [tool], pattern });
+          } catch (error) {
+            // Allow the call and tell the operator; the gate must not silently swallow the failure.
+            const message = `grant rule failed to persist: ${(error as Error).message}`;
+            deps.notify(`gate › ${tool}: ${message}`);
+            return settle({
+              action: "allow",
+              source: cause,
+              reason: `${reason}; ${message}; you will be asked again next time`,
+            });
+          }
           return settle({ action: "allow", source: cause, reason: `${reason}; operator granted always: ${pattern}` });
         }
         return settle({ action: "allow", source: cause, reason: `${reason}; operator allowed once (no grant pattern derivable)` });

@@ -214,18 +214,29 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
     .join("");
   const needles = [...dirs.flatMap((d) => [`${d}/`, `${d} `]), ".pi/gate/", ".pi/agent/gate/"];
   if (needles.some((n) => raw.includes(n) || normalized.includes(n))) return true;
-  // `cd` into a gate directory makes later relative components touch it.
-  return splitShellChain(raw).some((component) => {
+  // `cd` chains: track the virtual cwd across components and flag any cd
+  // that lands inside a gate directory. Each relative cd resolves against
+  // the previous cd's target, not the original cwd. Variables and dynamic
+  // paths fall through to the model gate.
+  let virtualCwd = cwd;
+  for (const component of splitShellChain(raw)) {
     const match = /^cd\s+(.*)$/.exec(component);
-    if (!match) return false;
-    const target = normalize(expandHome(match[1], home).trim());
-    if (dirs.some((d) => target === d || target.startsWith(`${d}/`))) return true;
-    if (cwd) {
-      const resolved = normalize(join(cwd, target));
-      return dirs.some((d) => resolved === d || resolved.startsWith(`${d}/`));
+    if (!match) continue;
+    const target = normalize(expandHome(match[1], home).trim().replace(/^["']|["']$/g, ""));
+    let next: string | undefined;
+    if (target === "/" || target === "") {
+      next = "/";
+    } else if (target.startsWith("/")) {
+      next = target;
+    } else if (virtualCwd) {
+      next = normalize(join(virtualCwd, target));
+    } else {
+      next = target;
     }
-    return false;
-  });
+    if (next && dirs.some((d) => next === d || next.startsWith(`${d}/`))) return true;
+    virtualCwd = next;
+  }
+  return false;
 }
 
 /** The pattern an "allow always" grant should pin: the file tool's target,

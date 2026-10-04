@@ -113,6 +113,22 @@ describe("rule matching", () => {
     expect(touches("cd /home/op/code && cat notes.md")).toBe(false);
   });
 
+  it("self-protection tracks cwd across a chain of cd commands", () => {
+    const touches = (command: string, cwd?: string) => touchesGatePaths("bash", { command }, HOME, cwd);
+    // `cd ~` then `cd .pi/agent/gate` lands inside the user-level gate dir.
+    expect(touches("cd ~ && cd .pi/agent/gate && cat config.json")).toBe(true);
+    // The chain is detected regardless of the original cwd — `cd ~` overrides it.
+    expect(touches("cd ~ && cd .pi/agent/gate && cat config.json", "/elsewhere")).toBe(true);
+    // An absolute-path cd followed by a relative one resolves against the new cwd,
+    // not the original (without cwd tracking the second cd would resolve to
+    // /proj/.pi/agent/gate, which isn't a gate dir; with tracking it resolves
+    // to /home/op/.pi/agent/gate, which is).
+    expect(touches("cd /home/op && cd .pi/agent/gate && cat config.json", "/proj")).toBe(true);
+    // The same relative cd from the original cwd, without the chain, lands somewhere
+    // else and is harmless.
+    expect(touches("cd .pi/agent/gate", "/proj")).toBe(false);
+  });
+
   it("self-protection still ignores look-alike paths", () => {
     const touches = (command: string) => touchesGatePaths("bash", { command }, HOME);
     expect(touches("ls /home/op/notes.pi/gatekeeper")).toBe(false);

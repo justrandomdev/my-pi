@@ -39,6 +39,10 @@ export interface GatekeeperConfig {
   cache: boolean;
   /** Character budget for the state sent to the model. */
   stateBudgetChars: number;
+  /** Transparency-line verbosity: `always` notifies every decision (default);
+   *  `summary` notifies only blocks/asks; `off` suppresses all notifications.
+   *  The decision log is unaffected. */
+  notify: "always" | "summary" | "off";
   log: LogConfig;
   /** Ordered; project rules come first (ADR-0001). */
   rules: Rule[];
@@ -67,6 +71,7 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
   failMode: "ask",
   cache: true,
   stateBudgetChars: 4000,
+  notify: "always",
   log: {
     level: "user",
     maxLines: 10000,

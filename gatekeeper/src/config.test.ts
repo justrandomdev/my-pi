@@ -10,6 +10,7 @@ describe("config resolution", () => {
     expect(DEFAULT_CONFIG.endpoint.model).toBe("clef-flash");
     expect(DEFAULT_CONFIG.endpoint.timeoutMs).toBe(30_000);
     expect(DEFAULT_CONFIG.failMode).toBe("ask");
+    expect(DEFAULT_CONFIG.notify).toBe("always");
     expect(DEFAULT_CONFIG.log).toEqual({
       level: "user",
       maxLines: 10000,

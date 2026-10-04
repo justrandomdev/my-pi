@@ -83,7 +83,7 @@ export class DecisionLog {
   async append(record: LogRecord): Promise<void> {
     const line = JSON.stringify({ ts: this.now().toISOString(), ...record });
     const count = await this.countLines();
-    await mkdir(this.opts.dir, { recursive: true });
+    await mkdir(this.opts.dir, { recursive: true, mode: 0o700 });
     await appendFile(this.path, `${line}\n`, "utf8");
     this.lineCount = count + 1;
     // Rotation happens once the file has reached the configured line count.

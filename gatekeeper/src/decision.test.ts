@@ -10,6 +10,7 @@ function makeDeps(overrides: {
   config?: Partial<GatekeeperConfig>;
   classify?: (input: any) => Promise<ClassificationResult>;
   askOperator?: (prompt: any) => Promise<"allow-once" | "allow-always" | "deny" | "no-ui">;
+  addGrant?: (rule: Rule) => Promise<void>;
 } = {}): { deps: GateDeps; log: any[]; notified: string[]; grants: Rule[]; classifyCalls: any[] } {
   const log: any[] = [];
   const notified: string[] = [];
@@ -30,7 +31,7 @@ function makeDeps(overrides: {
     askOperator: overrides.askOperator ?? (async () => "deny"),
     notify: (line) => notified.push(line),
     writeLog: (record) => log.push(record),
-    addGrant: (rule) => grants.push(rule),
+    addGrant: overrides.addGrant ?? (async (rule) => { grants.push(rule); }),
   };
   return { deps, log, notified, grants, classifyCalls };
 }
@@ -40,13 +41,49 @@ function classifyResult(choice: "safe" | "unsafe" | "unsure", confidence: number
 }
 
 describe("the gate", () => {
-  it("allows everything without logging when disabled", async () => {
-    const { deps, log } = makeDeps({ config: { enabled: false } });
+  it("passes through when disabled but still notifies and logs (transparency)", async () => {
+    const { deps, log, notified } = makeDeps({ config: { enabled: false } });
     const gate = createGate(deps);
     const decision = await gate.decide({ tool: "bash", args: { command: "rm -rf /" }, task: "clean up" });
     expect(decision.action).toBe("allow");
     expect(decision.source).toBe("disabled");
-    expect(log).toHaveLength(0);
+    expect(log).toHaveLength(1);
+    expect(log[0].source).toBe("disabled");
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toContain("disabled");
+  });
+
+  it("notify summary suppresses allow notifications but keeps blocks/asks", async () => {
+    const { deps, notified } = makeDeps({
+      config: { notify: "summary" },
+      classify: async () => classifyResult("safe", 0.9),
+    });
+    const gate = createGate(deps);
+    const allowed = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(allowed.action).toBe("allow");
+    expect(notified).toHaveLength(0);
+
+    const askedDeps = makeDeps({
+      config: { notify: "summary" },
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => "deny",
+    });
+    const askedGate = createGate(askedDeps.deps);
+    const asked = await askedGate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(asked.action).toBe("block");
+    expect(asked.source).toBe("operator");
+    expect(askedDeps.notified.length).toBeGreaterThan(0);
+  });
+
+  it("notify off suppresses all decision notifications but still logs", async () => {
+    const { deps, log, notified } = makeDeps({
+      config: { notify: "off" },
+      classify: async () => classifyResult("safe", 0.9),
+    });
+    const gate = createGate(deps);
+    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(notified).toHaveLength(0);
+    expect(log).toHaveLength(1);
   });
 
   it("an allow rule decides without consulting the model", async () => {
@@ -149,6 +186,21 @@ describe("the gate", () => {
     const decision = await gate.decide({ tool: "bash", args: { command: "ls ~/work" }, task: "t" });
     expect(decision.action).toBe("allow");
     expect(grants).toEqual([{ action: "allow", tools: ["bash"], pattern: "ls ~/work" }]);
+  });
+
+  it("a grant-write failure still allows the call but is surfaced to the operator", async () => {
+    const { deps, notified } = makeDeps({
+      classify: async () => classifyResult("safe", 0.99),
+      askOperator: async () => "allow-always",
+      addGrant: async () => {
+        throw new Error("disk full");
+      },
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "bash", args: { command: "ls ~/work" }, task: "t" });
+    expect(decision.action).toBe("allow");
+    expect(decision.reason).toContain("grant rule failed to persist");
+    expect(notified.some((n) => n.includes("grant rule failed to persist"))).toBe(true);
   });
 
   it("the session cache short-circuits identical re-issued calls", async () => {

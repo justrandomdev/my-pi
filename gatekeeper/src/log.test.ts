@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DecisionLog } from "./log.js";
@@ -58,6 +58,17 @@ describe("decision log", () => {
     const rotated = (await readFile(join(dir, "decisions.jsonl.1"), "utf8")).trim().split("\n");
     expect(rotated.map((l) => JSON.parse(l).tool)).toEqual(["x", "y", "z"]);
     expect((await readFile(join(dir, "decisions.jsonl"), "utf8")).trim()).toBe("");
+  });
+
+  it("creates the log directory with mode 0o700 so other local users can't read the log", async () => {
+    const nested = join(dir, "fresh", "deeper");
+    const log = new DecisionLog({ dir: nested, maxLines: 10, keepFiles: 3, retentionDays: 30, now });
+    await log.append(record("read"));
+    const info = await stat(nested);
+    expect(info.mode & 0o777).toBe(0o700);
+    const parentInfo = await stat(join(nested, ".."));
+    // the parent was created by the same mkdir call, also mode 0o700
+    expect(parentInfo.mode & 0o777).toBe(0o700);
   });
 
   it("deletes rotated files older than the retention window", async () => {

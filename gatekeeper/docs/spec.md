@@ -59,7 +59,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 - Transparency: one notify line per gated decision, including auto-allows.
 - Decision log: JSONL, one active log at the level the effective config selects (default user-level); rotation after a configurable line count (default 10,000, keeping 10 files); deletion of rotated files after a configurable age (default 30 days); arguments truncated (2KB) and file contents never logged.
 - Config: one config file per level; project overrides user per key (scalars) and in rule order (project rules evaluate before user rules, first hit wins).
-- Slash commands: `/gate` (status and session stats), `/gate rules` (view/add/remove/test), `/gate config` (threshold, model, retention, floors, levels), `/gate log` (tail/filter).
+- Slash commands: `/gate` (status and session stats), `/gate:rules` (view/add/remove/test), `/gate:config` (threshold, model, retention, floors, levels), `/gate:log` (tail/filter).
 - Scope: replaces pi-guardrails entirely except its herdr integration.
 
 See [adr/0001-project-overrides-user.md](adr/0001-project-overrides-user.md) and [adr/0002-decision-model-in-the-gate-path.md](adr/0002-decision-model-in-the-gate-path.md) for the two decisions that earned separate records.
