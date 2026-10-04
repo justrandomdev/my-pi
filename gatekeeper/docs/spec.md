@@ -46,6 +46,8 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 ## Implementation Decisions
 
 - Two-layer gate: static rules first (allow/deny, tool plus path/argument patterns, first hit wins, skipping the model), then the model gate for everything rules don't settle.
+- Self-protection (ADR-0003): agent tool calls touching the gate's own config or decision-log paths are always denied, before every rule and overridable by none. The operator configures the gate via operator-run slash commands or manual edits.
+- A `gatekeeper-config` skill ships with the package: it tells the agent it cannot configure the gate, and carries the slash-command reference and manual-config paths so the agent can explain configuration to the user.
 - Decision matrix: `safe` at or above the threshold auto-allows; `unsafe` at or above auto-blocks; explicit `unsure` and anything below the threshold converge on ask. The threshold defaults to 0.85 and is configurable. Choice order lists `safe` first so ties fail toward asking.
 - Default posture is deny-all: the shipped allow rules cover `ls` and `find` only.
 - Ask floors: `bash`, `powershell`, `edit`, and `write` default to the `ask` floor — the model can block or escalate but never auto-allow them; only a rule or grant can. Auto-allow is reserved for reads of unprotected paths (floors are per-tool and configurable).

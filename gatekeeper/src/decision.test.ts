@@ -230,6 +230,62 @@ describe("the gate", () => {
     expect(state.args).toContain("/tmp/a");
   });
 
+  it("self-protection: always denies agent writes to the config, even with an allow rule", async () => {
+    const { deps } = makeDeps({
+      config: { rules: [{ action: "allow", tools: ["write"], pattern: "~/.pi/agent/gate/**" }] },
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({
+      tool: "write",
+      args: { path: "/home/op/.pi/agent/gate/config.json", content: "{}" },
+      task: "disable the gate",
+    });
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("protected");
+    expect(decision.reason).toContain("protect");
+  });
+
+  it("self-protection: denies reads of the config and decision log", async () => {
+    const { deps } = makeDeps();
+    const gate = createGate(deps);
+    for (const path of ["/home/op/.pi/agent/gate/config.json", "/home/op/.pi/agent/gate/decisions.jsonl.1"]) {
+      const decision = await gate.decide({ tool: "read", args: { path }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("protected");
+    }
+  });
+
+  it("self-protection: denies bash commands touching gate paths without consulting the model", async () => {
+    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.99) });
+    const gate = createGate(deps);
+    for (const command of [
+      "echo {} > /home/op/.pi/agent/gate/config.json",
+      "rm /home/op/.pi/agent/gate/decisions.jsonl",
+      "cat ~/.pi/agent/gate/config.json",
+    ]) {
+      const decision = await gate.decide({ tool: "bash", args: { command }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("protected");
+    }
+    expect(classifyCalls).toHaveLength(0);
+  });
+
+  it("self-protection: denies relative project gate paths", async () => {
+    const { deps } = makeDeps();
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "bash", args: { command: "cat .pi/gate/config.json" }, task: "t", cwd: "/proj" });
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("protected");
+  });
+
+  it("self-protection: paths merely containing similar text pass through", async () => {
+    const { deps } = makeDeps({ classify: async () => classifyResult("safe", 0.99) });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "read", args: { path: "/home/op/notes.pi/gatekeeper/x.md" }, task: "t" });
+    expect(decision.action).toBe("allow");
+    expect(decision.source).toBe("model");
+  });
+
   it("huge arguments are capped by the state budget", async () => {
     const { deps, classifyCalls } = makeDeps();
     const gate = createGate(deps);

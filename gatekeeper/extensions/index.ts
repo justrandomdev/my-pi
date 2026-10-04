@@ -184,6 +184,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       tool: toolName,
       args: (event.input as Record<string, unknown>) ?? {},
       task: currentTask,
+      cwd: currentCtx.cwd,
     });
     if (decision.action === "allow") {
       stats.allowed++;

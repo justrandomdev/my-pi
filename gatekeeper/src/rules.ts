@@ -3,6 +3,8 @@
  * skips the decision model entirely. See docs/spec.md and GLOSSARY.md.
  */
 
+import { join, normalize } from "node:path";
+
 export interface Rule {
   /** allow or deny the call */
   action: "allow" | "deny";
@@ -182,6 +184,31 @@ export function matchRules(rules: Rule[], tool: string, args: Record<string, unk
 /** Deny-rule patterns: the protected paths injected into model state. */
 export function protectedPatterns(rules: Rule[]): string[] {
   return rules.filter((r) => r.action === "deny" && r.pattern).map((r) => r.pattern as string);
+}
+
+/** The directories the gate itself lives behind: config and decision log. */
+export function gateDirs(home: string, cwd?: string): string[] {
+  const dirs = [join(home, ".pi/agent/gate")];
+  if (cwd) dirs.push(join(cwd, ".pi/gate"));
+  return dirs.map((d) => normalize(d));
+}
+
+/** Self-protection: does this call touch the gate's own configuration or
+ *  log? Checked before every rule, and overridable by none of them —
+ *  an agent cannot neuter the gate through the gate. */
+export function touchesGatePaths(tool: string, args: Record<string, unknown>, home: string, cwd?: string): boolean {
+  const dirs = gateDirs(home, cwd);
+  if (FILE_TOOLS.has(tool)) {
+    const target = typeof args?.path === "string" ? normalize(expandHome(args.path, home)) : undefined;
+    if (!target) return false;
+    return dirs.some((d) => target === d || target.startsWith(`${d}/`));
+  }
+  const text = expandHome(argsText(tool, args), home);
+  return (
+    dirs.some((d) => text.includes(`${d}/`) || text.includes(`${d} `)) ||
+    text.includes(".pi/gate/") ||
+    text.includes(".pi/agent/gate/")
+  );
 }
 
 /** The pattern an "allow always" grant should pin: the file tool's target,

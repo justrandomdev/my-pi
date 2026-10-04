@@ -5,9 +5,9 @@
 
 import type { ClassifyInput, Classification, ClassificationResult } from "./classifier.js";
 import type { GatekeeperConfig } from "./config.js";
-import { grantPattern, matchRules, protectedPatterns, type Rule } from "./rules.js";
+import { grantPattern, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
 
-export type DecisionSource = "disabled" | "rule" | "model" | "operator" | "cache" | "fail";
+export type DecisionSource = "disabled" | "protected" | "rule" | "model" | "operator" | "cache" | "fail";
 
 export interface Decision {
   action: "allow" | "block";
@@ -43,6 +43,8 @@ export interface DecideInput {
   tool: string;
   args: Record<string, unknown>;
   task: string;
+  /** Working directory, for project-level gate paths. */
+  cwd?: string;
 }
 
 export interface GateDeps {
@@ -67,11 +69,13 @@ export function createGate(deps: GateDeps): Gate {
   const sessionCache = new Map<string, Decision>();
 
   return {
-    async decide({ tool, args, task }: DecideInput): Promise<Decision> {
+    async decide({ tool, args, task, cwd }: DecideInput): Promise<Decision> {
       const config = deps.getConfig();
       if (!config.enabled) return { action: "allow", source: "disabled" };
 
       const argsSummary = cap(JSON.stringify(args ?? {}), config.log.truncateArgsBytes);
+
+      // Self-protection (ADR-0003): before every rule, overridable by none.
       const cacheKey = config.cache ? `${tool}||${JSON.stringify(args)}||${task}` : "";
 
       const finish = (decision: Decision): Decision => {
@@ -92,6 +96,16 @@ export function createGate(deps: GateDeps): Gate {
         });
         return decision;
       };
+
+      // Self-protection (ADR-0003): before every rule, overridable by none.
+      if (touchesGatePaths(tool, args, deps.home, cwd)) {
+        return finish({
+          action: "block",
+          source: "protected",
+          reason:
+            "the gate protects its own configuration and log; agent tool calls touching them are always denied. The operator configures the gate with /gate commands or a manual edit.",
+        });
+      }
 
       // Layer 1: static rules. First hit wins; no model call.
       const rule = matchRules(config.rules, tool, args, deps.home);
