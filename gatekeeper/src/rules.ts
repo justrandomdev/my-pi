@@ -105,7 +105,10 @@ export function splitShellChain(command: string): string[] {
       i++;
       continue;
     }
-    if (ch === ";" || ch === "|" || ch === "&" || ch === "\n") {
+    // `&` separates (backgrounding) unless it is an fd duplication (2>&1):
+    // a `>` still open at the end of the accumulated text means this `&`
+    // belongs to the redirect, not the chain.
+    if (ch === ";" || ch === "|" || ch === "\n" || (ch === "&" && !/>$/.test(current))) {
       components.push(current);
       current = "";
       continue;
@@ -116,16 +119,28 @@ export function splitShellChain(command: string): string[] {
   return components.map((c) => c.trim()).filter(Boolean);
 }
 
-/** Command substitution or process substitution inside a component. */
+/** Command or process substitution inside a component. */
 const SUBSTITUTION = /\$\(|`|<\(|>\(/;
+/** Redirects to /dev/null: inert sinks, they write and leak nothing. */
+const NULL_REDIRECT = /\d*(?:>>|>)\s*\/dev\/null/;
+/** Fd duplication (2>&1): no new file target. */
+const FD_DUP = /\d*(?:>>|>)\s*&\d+/;
+
+/** Does this component contain something an allow rule must not silently pass? */
+function defeatsAllow(component: string): boolean {
+  if (SUBSTITUTION.test(component)) return true;
+  const inert = component.replace(FD_DUP, "").replace(NULL_REDIRECT, "");
+  // any remaining redirect operator (to a file or stdin) defeats the allow
+  return />>|>/.test(inert) || /<(?!\()/.test(inert);
+}
 
 function matchesShell(rule: Rule, command: string, home: string): boolean {
   const components = splitShellChain(command);
   if (rule.action === "allow") {
-    // Every component must match the pattern; substitution defeats the
-    // allow so `ls $(rm -rf /)` falls to the model gate.
+    // Every component must match the pattern; substitution and file-target
+    // redirects defeat the allow so the call falls to the model gate.
     return components.every(
-      (c) => !SUBSTITUTION.test(c) && matchesContent(rule.pattern as string, c, home, "allow"),
+      (c) => !defeatsAllow(c) && matchesContent(rule.pattern as string, c, home, "allow"),
     );
   }
   // A deny catches the chain if any component matches.

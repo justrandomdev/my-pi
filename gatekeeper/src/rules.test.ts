@@ -88,6 +88,17 @@ describe("rule matching", () => {
     expect(ruleMatches(rule, "bash", { command: "ls `rm -rf /`" }, HOME)).toBe(false);
   });
 
+  it("redirects defeat allow rules, except inert ones to /dev/null and fd duplication", () => {
+    const rule: Rule = { action: "allow", tools: ["bash"], pattern: "ls ?*" };
+    expect(ruleMatches(rule, "bash", { command: "ls /a && ls /b 2>/dev/null" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "ls /a >/dev/null" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "ls /a 2>&1" }, HOME)).toBe(true);
+    expect(ruleMatches(rule, "bash", { command: "ls /a > out.txt" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "ls /a >> /etc/passwd" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "ls -la> /etc/passwd" }, HOME)).toBe(false);
+    expect(ruleMatches(rule, "bash", { command: "cat notes < ~/.creds" }, HOME)).toBe(false);
+  });
+
   it("matchRules returns the first hit in order", () => {
     const rules: Rule[] = [
       { action: "allow", tools: ["bash"], pattern: "~/work/**" },
