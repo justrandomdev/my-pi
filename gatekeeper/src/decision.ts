@@ -71,7 +71,6 @@ export function createGate(deps: GateDeps): Gate {
   return {
     async decide({ tool, args, task, cwd }: DecideInput): Promise<Decision> {
       const config = deps.getConfig();
-      if (!config.enabled) return { action: "allow", source: "disabled" };
 
       const argsSummary = cap(JSON.stringify(args ?? {}), config.log.truncateArgsBytes);
 
@@ -97,7 +96,8 @@ export function createGate(deps: GateDeps): Gate {
         return decision;
       };
 
-      // Self-protection (ADR-0003): before every rule, overridable by none.
+      // Self-protection (ADR-0003): before the enabled check and every rule,
+      // overridable by none — it holds even while the gate is disabled.
       if (touchesGatePaths(tool, args, deps.home, cwd)) {
         return finish({
           action: "block",
@@ -106,6 +106,8 @@ export function createGate(deps: GateDeps): Gate {
             "the gate protects its own configuration and log; agent tool calls touching them are always denied. The operator configures the gate with /gate commands or a manual edit.",
         });
       }
+
+      if (!config.enabled) return { action: "allow", source: "disabled" };
 
       // Layer 1: static rules. First hit wins; no model call.
       const rule = matchRules(config.rules, tool, args, deps.home);

@@ -46,7 +46,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 ## Implementation Decisions
 
 - Two-layer gate: static rules first (allow/deny, tool plus path/argument patterns, first hit wins, skipping the model), then the model gate for everything rules don't settle.
-- Self-protection (ADR-0003): agent tool calls touching the gate's own config or decision-log paths are always denied, before every rule and overridable by none. The operator configures the gate via operator-run slash commands or manual edits.
+- Self-protection (ADR-0003): agent tool calls touching the gate's own config or decision-log paths are always denied, before the enabled check and every rule, overridable by none. Shell text is matched with `$HOME` expansion, dot-segment normalization, and `cd`-target resolution; encoded path spellings fall through to the model gate. The operator configures the gate via operator-run slash commands or manual edits.
 - A `gatekeeper-config` skill ships with the package: it tells the agent it cannot configure the gate, and carries the slash-command reference and manual-config paths so the agent can explain configuration to the user.
 - Decision matrix: `safe` at or above the threshold auto-allows; `unsafe` at or above auto-blocks; explicit `unsure` and anything below the threshold converge on ask. The threshold defaults to 0.85 and is configurable. Choice order lists `safe` first so ties fail toward asking.
 - Default posture is deny-all: the shipped allow rules cover `ls` and `find` only.
@@ -83,3 +83,6 @@ See [adr/0001-project-overrides-user.md](adr/0001-project-overrides-user.md) and
 
 - Measure classification latency on the operator's actual hardware before release; the model is large and the gate sits on the critical path of every tool call.
 - ADR-0002 names the accepted vulnerabilities: judge-steering (contained by the state invariant), silent false-allow (contained by floors and static protected paths), remote-endpoint egress, and the model-down ask storm.
+- Residual: the decision log records truncated command arguments — secrets typed into commands land in it. Keep the log directory private.
+- Residual: two concurrent pi sessions share one user-level decision log; rotation can race (fail-closed direction, at worst a lost log line).
+- The spec's end-to-end smoke test (`pi -e`) has been exercised manually; automating it remains open.

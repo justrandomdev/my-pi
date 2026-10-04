@@ -237,14 +237,18 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
         const level = ref.startsWith("p") ? "project" : "user";
         const index = (Number(ref.match(/\d+$/)?.[0] ?? 0) || 0) - 1;
         const scoped = await readScoped(true, ctx.cwd);
-        const rules = scoped[level]?.rules ?? [];
-        const removed = rules[index];
+        const removed = scoped[level]?.rules?.[index];
         if (!removed) {
           ctx.ui.notify(`gate › no rule ${ref} at ${level} level`, "warning");
           return;
         }
+        const signature = JSON.stringify(removed);
         await writeScoped(level, (s) => {
-          s.rules = (s.rules ?? []).filter((r) => r !== removed);
+          // Remove by deep equality inside the read-modify-write, so a
+          // rule added between listing and removal survives.
+          const rules = s.rules ?? [];
+          const at = rules.findIndex((r) => JSON.stringify(r) === signature);
+          s.rules = at === -1 ? rules : rules.filter((_, i) => i !== at);
         }, ctx.cwd);
         ctx.ui.notify(`gate › removed ${removed.action} rule: ${removed.pattern ?? "(tool rule)"}`, "info");
         return;

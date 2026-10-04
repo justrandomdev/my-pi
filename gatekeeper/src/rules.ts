@@ -203,12 +203,29 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
     if (!target) return false;
     return dirs.some((d) => target === d || target.startsWith(`${d}/`));
   }
-  const text = expandHome(argsText(tool, args), home);
-  return (
-    dirs.some((d) => text.includes(`${d}/`) || text.includes(`${d} `)) ||
-    text.includes(".pi/gate/") ||
-    text.includes(".pi/agent/gate/")
-  );
+  const raw = expandHome(argsText(tool, args), home)
+    .replace(/\$\{HOME\}/g, home)
+    .replace(/\$HOME/g, home);
+  // Normalize dot-segments inside path-looking tokens so
+  // `.pi/agent/../agent/gate` cannot slip past a literal needle.
+  const normalized = raw
+    .split(/(\s+)/)
+    .map((t) => (t.includes("/") && t.includes("..") ? normalize(t) : t))
+    .join("");
+  const needles = [...dirs.flatMap((d) => [`${d}/`, `${d} `]), ".pi/gate/", ".pi/agent/gate/"];
+  if (needles.some((n) => raw.includes(n) || normalized.includes(n))) return true;
+  // `cd` into a gate directory makes later relative components touch it.
+  return splitShellChain(raw).some((component) => {
+    const match = /^cd\s+(.*)$/.exec(component);
+    if (!match) return false;
+    const target = normalize(expandHome(match[1], home).trim());
+    if (dirs.some((d) => target === d || target.startsWith(`${d}/`))) return true;
+    if (cwd) {
+      const resolved = normalize(join(cwd, target));
+      return dirs.some((d) => resolved === d || resolved.startsWith(`${d}/`));
+    }
+    return false;
+  });
 }
 
 /** The pattern an "allow always" grant should pin: the file tool's target,

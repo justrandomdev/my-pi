@@ -170,6 +170,32 @@ describe("gatekeeper extension", () => {
     expect(rules).toContainEqual({ action: "allow", tools: ["bash"], pattern: "ls ~/work" });
   });
 
+  it("gate:rules rm removes exactly the listed rule and preserves the rest", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    await mkdir(join(userHome, ".pi/agent/gate"), { recursive: true });
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({
+        rules: [
+          { action: "deny", pattern: "~/creds" },
+          { action: "allow", tools: ["bash"], pattern: "ls ?*" },
+        ],
+      }),
+    );
+    const handler = captured.commands.get("gate:rules")!.handler;
+    const ctx = env.ctx();
+    await handler("rm u1", ctx);
+    const after = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(after.rules).toEqual([{ action: "allow", tools: ["bash"], pattern: "ls ?*" }]);
+    // removing a rule that does not exist reports and changes nothing
+    await handler("rm u9", ctx);
+    expect(env.ui.notified.some((n) => n.includes("no rule"))).toBe(true);
+    const unchanged = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(unchanged.rules).toEqual([{ action: "allow", tools: ["bash"], pattern: "ls ?*" }]);
+  });
+
   it("a dismissed operator dialog denies", async () => {
     const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
     env.ui.select = async (): Promise<string | undefined> => undefined;

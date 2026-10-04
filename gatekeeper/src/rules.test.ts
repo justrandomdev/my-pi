@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchRules, protectedPatterns, ruleMatches, type Rule } from "./rules.js";
+import { matchRules, protectedPatterns, ruleMatches, touchesGatePaths, type Rule } from "./rules.js";
 
 const HOME = "/home/op";
 
@@ -97,6 +97,26 @@ describe("rule matching", () => {
     expect(ruleMatches(rule, "bash", { command: "ls /a >> /etc/passwd" }, HOME)).toBe(false);
     expect(ruleMatches(rule, "bash", { command: "ls -la> /etc/passwd" }, HOME)).toBe(false);
     expect(ruleMatches(rule, "bash", { command: "cat notes < ~/.creds" }, HOME)).toBe(false);
+  });
+
+  it("self-protection catches env-var and dot-segment path spellings in shell text", () => {
+    const touches = (command: string) => touchesGatePaths("bash", { command }, HOME);
+    expect(touches("cat $HOME/.pi/agent/gate/config.json")).toBe(true);
+    expect(touches("cat ${HOME}/.pi/agent/gate/config.json")).toBe(true);
+    expect(touches("cat /home/op/.pi/agent/../agent/gate/config.json")).toBe(true);
+    expect(touches("sed -i s/../../ /home/op/.pi/agent/gate/../gate/config.json")).toBe(true);
+  });
+
+  it("self-protection catches cd into a gate directory before relative access", () => {
+    const touches = (command: string) => touchesGatePaths("bash", { command }, HOME);
+    expect(touches("cd ~/.pi/agent/gate && cat config.json")).toBe(true);
+    expect(touches("cd /home/op/code && cat notes.md")).toBe(false);
+  });
+
+  it("self-protection still ignores look-alike paths", () => {
+    const touches = (command: string) => touchesGatePaths("bash", { command }, HOME);
+    expect(touches("ls /home/op/notes.pi/gatekeeper")).toBe(false);
+    expect(touches("cat $HOME/notes.txt")).toBe(false);
   });
 
   it("matchRules returns the first hit in order", () => {

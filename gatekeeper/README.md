@@ -20,11 +20,13 @@ Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`fa
 
 ## Security model
 
-- **The agent cannot configure the gate.** Every agent tool call touching the gate's config or decision-log paths is denied before any rule — a compromised model cannot neuter the gate through the gate.
+- **The agent cannot configure the gate.** Every agent tool call touching the gate's config or decision-log paths is denied before any rule — a compromised model cannot neuter the gate through the gate. This holds even while the gate is `enabled: false`; only a human edit can change that state.
 - **Slash commands are operator-run** — typed by you in the TUI, never issued by the agent.
 - **Manual edits are human actions** — your editor is outside the gate.
 - **Remote endpoints are data egress**: configuring a remote clef/Jev endpoint sends every gated call's tool name, arguments, and current task to that service (ADR-0002). Local-first is the default.
 - Residual: editing gatekeeper's *source* in a dev repo isn't covered by self-protection; it relies on the `edit`/`write` ask floors and operator review.
+- Residual: self-protection matches literal, `$HOME`-expanded, and dot-segment-normalized paths in shell text — encoded or obfuscated path spellings fall through to the model gate rather than being denied outright.
+- Residual: the decision log records command arguments (truncated). A secret passed inside a command (`curl -H "Authorization: Bearer …"`) lands in `decisions.jsonl` — keep the log's directory private, and rotate it with `log.retentionDays`.
 
 ## Manual configuration
 
@@ -68,7 +70,7 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | `false` passes everything through ungated (self-protection still applies while loaded). |
+| `enabled` | `true` | `false` passes everything through ungated — except self-protection, which applies whenever the gate is loaded. |
 | `threshold` | `0.85` | Minimum confidence for autonomous allow/block. Below it: operator. |
 | `endpoint.baseUrl` | `http://localhost:11434` | Base of a Jev/System One-compatible service. The gate calls `${baseUrl}/v1/systemone`. |
 | `endpoint.model` | `clef-flash` | Any model the endpoint serves (`clef`, a remote Jev, …). |
@@ -111,7 +113,7 @@ Operators approve "always" from a prompt to write a grant rule (exact command or
 
 ### The decision log
 
-`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, truncated arguments, action, source (`rule` / `model` / `operator` / `cache` / `fail` / `protected` / `disabled`), classification, confidence, and the reason. It never contains file contents or full unbounded arguments.
+`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, truncated arguments, action, source (`rule` / `model` / `operator` / `cache` / `fail` / `protected` / `disabled`), classification, confidence, and the reason. It never contains file contents or full unbounded arguments — but note that secrets typed *into commands* are arguments, and do land here truncated.
 
 ## Slash commands
 

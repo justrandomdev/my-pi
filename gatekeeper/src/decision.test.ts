@@ -278,6 +278,22 @@ describe("the gate", () => {
     expect(decision.source).toBe("protected");
   });
 
+  it("self-protection applies even when the gate is disabled", async () => {
+    const { deps } = makeDeps({ config: { enabled: false } });
+    const gate = createGate(deps);
+    const decision = await gate.decide({
+      tool: "write",
+      args: { path: "/home/op/.pi/agent/gate/config.json", content: "{}" },
+      task: "neuter the gate",
+    });
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("protected");
+    // but ordinary calls pass through ungated when disabled
+    const passthrough = await gate.decide({ tool: "bash", args: { command: "rm -rf /tmp/x" }, task: "t" });
+    expect(passthrough.action).toBe("allow");
+    expect(passthrough.source).toBe("disabled");
+  });
+
   it("self-protection: paths merely containing similar text pass through", async () => {
     const { deps } = makeDeps({ classify: async () => classifyResult("safe", 0.99) });
     const gate = createGate(deps);
