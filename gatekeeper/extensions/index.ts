@@ -11,6 +11,7 @@ import { configPaths, DEFAULT_CONFIG, resolveConfig, type DeepPartial, type Gate
 import { createSystemOneClassifier } from "../src/classifier.js";
 import { createGate, type GateDeps, type OperatorPromptInfo } from "../src/decision.js";
 import { DecisionLog } from "../src/log.js";
+import { createGatePrompt, type GatePromptResult } from "../src/prompt.js";
 import { matchRules, type Rule } from "../src/rules.js";
 
 export interface GatekeeperOptions {
@@ -96,6 +97,23 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     const ctx = currentCtx;
     if (!ctx || !ctx.hasUI) return "no-ui";
     stats.asked++;
+    // The custom bordered prompt when the mode supports it (TUI)…
+    if (typeof ctx.ui.custom === "function") {
+      try {
+        return await ctx.ui.custom<GatePromptResult>(
+          createGatePrompt({
+            tool: prompt.tool,
+            classification: prompt.classification,
+            confidence: prompt.confidence,
+            reason: prompt.reason,
+            argsSummary: prompt.argsSummary,
+          }),
+        );
+      } catch {
+        // fall through to the selector dialog below
+      }
+    }
+    // …and the plain selector everywhere else (RPC, print).
     const detail =
       (prompt.classification
         ? `Classification: ${prompt.classification} (confidence ${prompt.confidence?.toFixed(2)})\n`

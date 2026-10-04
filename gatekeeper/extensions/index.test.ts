@@ -61,6 +61,7 @@ function makeEnv(canned: { choice: "safe" | "unsafe" | "unsure"; confidence: num
   const ui = {
     notified: [] as string[],
     selected: [] as { title: string; options: string[] }[],
+    custom: undefined as unknown as ((factory: any) => Promise<any>) | undefined,
     notify: (message: string) => ui.notified.push(message),
     select: async (title: string, options: string[]): Promise<string | undefined> => {
       ui.selected.push({ title, options });
@@ -134,6 +135,39 @@ describe("gatekeeper extension", () => {
     // the stub operator picks Deny
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain("operator denied");
+  });
+
+  it("uses the custom bordered prompt when the mode provides ui.custom", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    let component: any;
+    const ctx = env.ctx();
+    ctx.ui.custom = (async (factory: any) =>
+      new Promise((resolve) => {
+        component = factory({}, { fg: (_c: any, t: any) => t, bold: (t: any) => t } as any, {}, resolve);
+      })) as any;
+    const handler = captured.events.get("tool_call")![0];
+    const pending = handler({ type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } }, ctx);
+    await new Promise((r) => setTimeout(r, 10));
+    // the component renders a bordered box
+    const lines = component.render(80) as string[];
+    expect(lines[0].startsWith("╭")).toBe(true);
+    expect(lines[lines.length - 1].endsWith("╯")).toBe(true);
+    // pressing a settles the dialog; allow-always writes the grant
+    component.handleInput("a");
+    const result = await pending;
+    expect(result).toBeUndefined();
+    expect(env.ui.selected).toHaveLength(0); // the selector was not used
+    // the grant write is fire-and-forget; poll until it lands
+    const configPath = join(userHome, ".pi/agent/gate/config.json");
+    let rules: any[] = [];
+    for (let i = 0; i < 50 && rules.length < 1; i++) {
+      try {
+        rules = (JSON.parse(await readFile(configPath, "utf8")) ?? {}).rules ?? [];
+      } catch {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    expect(rules).toContainEqual({ action: "allow", tools: ["bash"], pattern: "ls ~/work" });
   });
 
   it("a dismissed operator dialog denies", async () => {
