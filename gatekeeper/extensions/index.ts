@@ -310,6 +310,12 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
               ...(scoped.endpoint ?? {}),
               [key.slice("endpoint.".length)]: parsed,
             };
+          } else if (key.startsWith("floors.")) {
+            scoped.floors = {
+              ...DEFAULT_CONFIG.floors,
+              ...(scoped.floors ?? {}),
+              [key.slice("floors.".length)]: parsed as boolean,
+            };
           } else {
             (scoped as Record<string, unknown>)[key] = parsed;
           }
