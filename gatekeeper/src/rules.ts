@@ -3,7 +3,7 @@
  * skips the decision model entirely. See docs/spec.md and GLOSSARY.md.
  */
 
-import { join, normalize } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 
 export interface Rule {
   /** allow or deny the call */
@@ -11,12 +11,14 @@ export interface Rule {
   /** tool names this rule applies to; omit for any tool */
   tools?: string[];
   /** path/argument glob; omit for any arguments. `~` expands to home.
-   *  File tools match against their path target (anchored, full match).
-   *  Shell commands and other tools match over their text/serialized
+   *  File tools match against their path target (anchored, full match;
+   *  a glob-free `deny` also covers everything beneath the pattern). Shell
+   *  commands and other tools match over their text/serialized
    *  arguments, asymmetrically for safety: `allow` rules anchor to the
-   *  start of the text (a leading `*` opts out), and `*`/`**` cross
-   *  everything; `deny` rules search the whole text so they catch
-   *  exfiltration anywhere in a command. */
+   *  start of the text (a leading `*` opts out; a glob-free `allow`
+   *  matches exactly), and `*`/`**` cross everything; `deny` rules
+   *  search the whole text so they catch exfiltration anywhere in a
+   *  command. */
   pattern?: string;
   reason?: string;
 }
@@ -69,10 +71,13 @@ function contentGlobToRegexSource(pattern: string): string {
 
 function matchesContent(pattern: string, text: string, home: string, action: Rule["action"]): boolean {
   const source = contentGlobToRegexSource(normalizePattern(pattern, home));
-  // Allows anchor to the start of the text (a leading * opts out);
-  // denies search anywhere so nothing hides mid-command.
+  // Allows anchor to the start of the text (a leading * opts out); a
+  // glob-free allow also anchors to the end — an exact-text match, so
+  // `ls -la /tmp` cannot carry `ls -la /tmpsecrets` through. Denies
+  // search anywhere so nothing hides mid-command.
   const anchored = action === "allow" && !pattern.startsWith("*");
-  const regex = new RegExp(anchored ? `^${source}` : source);
+  const exact = anchored && !/[*?]/.test(pattern);
+  const regex = new RegExp(anchored ? `^${source}${exact ? "$" : ""}` : source);
   return regex.test(expandHome(text, home));
 }
 
@@ -157,8 +162,10 @@ function argsText(tool: string, args: Record<string, unknown>): string {
   return JSON.stringify(args ?? {});
 }
 
-/** Does this rule match the given call? */
-export function ruleMatches(rule: Rule, tool: string, args: Record<string, unknown>, home: string): boolean {
+/** Does this rule match the given call? File-tool targets also resolve
+ *  against the cwd, so an absolute pattern (a grant) catches relative
+ *  spellings of the same path. */
+export function ruleMatches(rule: Rule, tool: string, args: Record<string, unknown>, home: string, cwd?: string): boolean {
   if (rule.tools && !rule.tools.includes(tool)) return false;
   if (!rule.pattern) return true;
 
@@ -171,14 +178,27 @@ export function ruleMatches(rule: Rule, tool: string, args: Record<string, unkno
   if (FILE_TOOLS.has(tool)) {
     const target = args?.path;
     if (typeof target !== "string") return false;
-    return matchesTarget(rule.pattern, target, home);
+    const raw = expandHome(target, home);
+    const resolved = isAbsolute(raw) ? normalize(raw) : cwd ? normalize(join(cwd, raw)) : normalize(raw);
+    // A glob-free deny also matches everything beneath the pattern: a file
+    // target can never sit beneath a file, so this widens directories only.
+    // Glob-bearing denies do exactly what their glob says.
+    const widen = rule.action === "deny" && !/[*?]/.test(rule.pattern);
+    const patterns = widen ? [rule.pattern, `${rule.pattern.replace(/\/+$/, "")}/**`] : [rule.pattern];
+    return patterns.some((p) => matchesTarget(p, raw, home) || matchesTarget(p, resolved, home));
   }
   return matchesContent(rule.pattern, argsText(tool, args), home, rule.action);
 }
 
 /** First matching rule in order, or undefined. */
-export function matchRules(rules: Rule[], tool: string, args: Record<string, unknown>, home: string): Rule | undefined {
-  return rules.find((rule) => ruleMatches(rule, tool, args, home));
+export function matchRules(
+  rules: Rule[],
+  tool: string,
+  args: Record<string, unknown>,
+  home: string,
+  cwd?: string,
+): Rule | undefined {
+  return rules.find((rule) => ruleMatches(rule, tool, args, home, cwd));
 }
 
 /** Deny-rule patterns: the protected paths injected into model state. */
@@ -199,9 +219,15 @@ export function gateDirs(home: string, cwd?: string): string[] {
 export function touchesGatePaths(tool: string, args: Record<string, unknown>, home: string, cwd?: string): boolean {
   const dirs = gateDirs(home, cwd);
   if (FILE_TOOLS.has(tool)) {
-    const target = typeof args?.path === "string" ? normalize(expandHome(args.path, home)) : undefined;
-    if (!target) return false;
-    return dirs.some((d) => target === d || target.startsWith(`${d}/`));
+    const raw = typeof args?.path === "string" ? expandHome(args.path, home) : undefined;
+    if (raw === undefined) return false;
+    const target = normalize(raw);
+    // Resolve relative targets against the cwd before comparing with the
+    // absolute gate dirs; a relative spelling that cannot resolve to one
+    // (no cwd, or a dot-detour) still hits the literal gate-dir prefixes.
+    const resolved = isAbsolute(target) ? target : cwd ? normalize(join(cwd, target)) : target;
+    if (dirs.some((d) => resolved === d || resolved.startsWith(`${d}/`))) return true;
+    return [".pi/gate", ".pi/agent/gate"].some((p) => target === p || target.startsWith(`${p}/`));
   }
   const raw = expandHome(argsText(tool, args), home)
     .replace(/\$\{HOME\}/g, home)
@@ -239,11 +265,16 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
   return false;
 }
 
-/** The pattern an "allow always" grant should pin: the file tool's target,
- *  or the shell/other tool's argument text. */
-export function grantPattern(tool: string, args: Record<string, unknown>): string | undefined {
+/** The pattern an "allow always" grant should pin: the file tool's
+ *  cwd-absolute target (grants live in the user-level config — a relative
+ *  pattern would allow that path in every project), or the shell/other
+ *  tool's argument text. */
+export function grantPattern(tool: string, args: Record<string, unknown>, home: string, cwd?: string): string | undefined {
   if (FILE_TOOLS.has(tool)) {
-    return typeof args?.path === "string" ? args.path : undefined;
+    if (typeof args?.path !== "string") return undefined;
+    const target = normalize(expandHome(args.path, home));
+    if (isAbsolute(target)) return target;
+    return cwd ? normalize(join(cwd, target)) : undefined;
   }
   const text = argsText(tool, args);
   return text && text !== "{}" ? text : undefined;

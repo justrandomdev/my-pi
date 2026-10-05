@@ -7,8 +7,8 @@
 import type { Rule } from "./rules.js";
 
 export interface EndpointConfig {
-  /** Base URL of a Jev/System One-compatible service. */
-  baseUrl: string;
+  /** Full request URL of a Jev/System One-compatible service. */
+  url: string;
   model: string;
   apiKey?: string;
   timeoutMs: number;
@@ -59,7 +59,7 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
   enabled: true,
   threshold: 0.85,
   endpoint: {
-    baseUrl: "http://localhost:11434",
+    url: "http://localhost:11434/v1/systemone",
     model: "clef-flash",
     // Cold-start load of a large local model can take tens of seconds;
     // warm calls are sub-second. keep_alive keeps the model warm between calls.

@@ -26,6 +26,46 @@ type AnyCtx = ExtensionContext & {
   isProjectTrusted(): boolean;
 };
 
+/** `gate:config set` value validators: each returns an error message or
+ *  undefined. Only whitelisted keys may be written. */
+const isBoolean = (value: unknown): string | undefined =>
+  typeof value === "boolean" ? undefined : "must be true or false";
+const isString = (value: unknown): string | undefined =>
+  typeof value === "string" ? undefined : "must be a string";
+const isNonEmptyString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() !== "" ? undefined : "must be a non-empty string";
+const isPositiveInt = (value: unknown): string | undefined =>
+  typeof value === "number" && Number.isInteger(value) && value > 0 ? undefined : "must be a positive integer";
+const isNonNegativeInt = (value: unknown): string | undefined =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 ? undefined : "must be zero or a positive integer";
+const isPortion = (value: unknown): string | undefined =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? undefined
+    : "must be a number between 0 and 1";
+const isOneOf = (...options: string[]) =>
+  (value: unknown): string | undefined =>
+    options.includes(value as string) ? undefined : `must be one of ${options.map((o) => `"${o}"`).join(", ")}`;
+
+const CONFIG_KEYS: Record<string, (value: unknown) => string | undefined> = {
+  enabled: isBoolean,
+  cache: isBoolean,
+  threshold: isPortion,
+  policy: isNonEmptyString,
+  failMode: isOneOf("ask", "block"),
+  notify: isOneOf("always", "summary", "off"),
+  stateBudgetChars: isPositiveInt,
+  "endpoint.url": isNonEmptyString,
+  "endpoint.model": isNonEmptyString,
+  "endpoint.apiKey": isString,
+  "endpoint.timeoutMs": isPositiveInt,
+  "endpoint.keepAlive": isString,
+  "log.level": isOneOf("user", "project"),
+  "log.maxLines": isPositiveInt,
+  "log.keepFiles": isNonNegativeInt,
+  "log.retentionDays": isPositiveInt,
+  "log.truncateArgsBytes": isPositiveInt,
+};
+
 export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = {}): void {
   const home = options.home ?? os.homedir();
   const fetchFn = options.fetchFn ?? fetch;
@@ -93,7 +133,9 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     });
   }
 
-  async function askOperator(prompt: OperatorPromptInfo): Promise<"allow-once" | "allow-always" | "deny" | "no-ui"> {
+  async function askOperator(
+    prompt: OperatorPromptInfo,
+  ): Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui"> {
     const ctx = currentCtx;
     if (!ctx || !ctx.hasUI) return "no-ui";
     stats.asked++;
@@ -121,30 +163,62 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       `Reason: ${prompt.reason}\n` +
       `Arguments: ${prompt.argsSummary}`;
     ctx.ui.notify(`gate › ${prompt.tool}\n${detail}`, "warning");
-    const choice = await ctx.ui.select(`gate › ${prompt.tool}`, ["Allow once", "Allow always", "Deny"]);
+    const choice = await ctx.ui.select(`gate › ${prompt.tool}`, [
+      "Allow once",
+      "Allow for session",
+      "Allow always",
+      "Deny",
+    ]);
     if (choice === "Allow once") return "allow-once";
+    if (choice === "Allow for session") return "allow-session";
     if (choice === "Allow always") return "allow-always";
     return "deny";
   }
 
-  /** Tokenize a slash-command argument string: strips whitespace, recognizes
-   *  `--project`, returns the target level and the remaining parts. Each
-   *  remaining part has matching surrounding quotes stripped, so
-   *  `add allow "*"` and `add allow *` produce the same pattern. */
+  /** Tokenize a slash-command argument string, quotes respected: a quoted
+   *  token may contain spaces (`add allow "ls ?*"` is one pattern token),
+   *  and an empty pair of quotes is an empty token (`set endpoint.keepAlive ""`).
+   *  Surrounding quotes are stripped, so `add allow "*"` and `add allow *`
+   *  produce the same pattern. */
+  function tokenize(raw: string): string[] {
+    const parts: string[] = [];
+    let current = "";
+    let quoted = false;
+    let quote: "\"" | "'" | undefined;
+    for (const ch of raw) {
+      if (quote) {
+        if (ch === quote) quote = undefined;
+        else current += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        quoted = true;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (current || quoted) {
+          parts.push(current);
+          current = "";
+          quoted = false;
+        }
+        continue;
+      }
+      current += ch;
+    }
+    if (current || quoted) parts.push(current);
+    return parts;
+  }
+
+  /** Parse a slash-command argument string: quote-aware tokens,
+   *  `--project` recognized and removed, everything else left as-is. */
   function parseCmdArgs(raw: string): { level: "user" | "project"; parts: string[] } {
-    const parts = raw.trim().split(/\s+/).filter(Boolean);
+    const parts = tokenize(raw);
     const level: "user" | "project" = parts.includes("--project") ? "project" : "user";
     return {
       level,
-      parts: parts.filter((p) => p !== "--project").map(stripEnclosingQuotes),
+      parts: parts.filter((p) => p !== "--project"),
     };
-  }
-
-  function stripEnclosingQuotes(text: string): string {
-    if (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
-      return text.slice(1, -1);
-    }
-    return text;
   }
 
   /** Write a scoped config file, creating it if needed. Project-level writes
@@ -237,7 +311,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
         .join(", ");
       const lines = [
         `Gatekeeper ${effective.enabled ? "enabled" : "disabled"}`,
-        `Endpoint: ${effective.endpoint.model} @ ${effective.endpoint.baseUrl}`,
+        `Endpoint: ${effective.endpoint.model} @ ${effective.endpoint.url}`,
         `Threshold: ${effective.threshold} | Floors: ${floors || "none"} | Fail mode: ${effective.failMode}`,
         `Rules: ${effective.rules.length} (incl. shipped defaults) | Log: ${logDir(ctx.cwd)}`,
         `Session: ${stats.allowed} allowed, ${stats.blocked} blocked, ${stats.asked} asked`,
@@ -264,6 +338,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           );
           const proceed = await ctx.ui.confirm?.(
             `gate › write the ${clean[1]} rule with pattern "${pattern}"?`,
+            "It matches every argument.",
           );
           if (!proceed) {
             ctx.ui.notify(`gate › rule add aborted`, "info");
@@ -311,7 +386,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           ctx.ui.notify(`gate › arguments are not valid JSON: ${clean[2]}`, "error");
           return;
         }
-        const rule = matchRules(effective.rules, tool, callArgs, home);
+        const rule = matchRules(effective.rules, tool, callArgs, home, ctx.cwd);
         ctx.ui.notify(
           rule
             ? `gate › ${tool} matches the ${rule.action} rule: ${rule.pattern ?? "(tool rule)"}`
@@ -345,13 +420,16 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       if (clean[0] === "set" && clean[1] && clean[2] !== undefined) {
         const [, key, ...rest] = clean;
         const value = rest.join(" ");
-        // Validate before writing so a bad value doesn't half-overwrite the file.
-        if (key === "log.level" && value !== "user" && value !== "project") {
-          ctx.ui.notify(`gate › log.level must be "user" or "project", got "${value}"`, "warning");
+        // Validate before writing: an unknown key or a bad value must not
+        // land in the file — a string `rules` or a NaN threshold used to
+        // brick the gate until a manual edit.
+        if (key === "rules") {
+          ctx.ui.notify(`gate › rules cannot be set here — use gate:rules add/rm`, "warning");
           return;
         }
-        if (key === "failMode" && value !== "ask" && value !== "block") {
-          ctx.ui.notify(`gate › failMode must be "ask" or "block", got "${value}"`, "warning");
+        const validator = key.startsWith("floors.") ? isBoolean : CONFIG_KEYS[key];
+        if (!validator) {
+          ctx.ui.notify(`gate › unknown key "${key}" — valid keys: ${[...Object.keys(CONFIG_KEYS), "floors.<tool>"].join(", ")}`, "warning");
           return;
         }
         const parse = (): unknown => {
@@ -367,6 +445,11 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           return Number.isNaN(Number(value)) ? value : Number(value);
         };
         const parsed = parse();
+        const invalid = validator(parsed);
+        if (invalid) {
+          ctx.ui.notify(`gate › ${key} ${invalid}, got "${value}"`, "warning");
+          return;
+        }
         await writeScoped(level, (scoped) => {
           if (key === "log.level") {
             scoped.log = { ...DEFAULT_CONFIG.log, ...(scoped.log ?? {}), level: value as "user" | "project" };
@@ -402,7 +485,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           `gate › effective config (defaults < user < project):`,
           `enabled: ${effective.enabled}`,
           `threshold: ${effective.threshold}`,
-          `endpoint: ${effective.endpoint.baseUrl} (${effective.endpoint.model})`,
+          `endpoint: ${effective.endpoint.url} (${effective.endpoint.model})`,
           `failMode: ${effective.failMode} | cache: ${effective.cache}`,
           `log: level=${effective.log.level} maxLines=${effective.log.maxLines} keepFiles=${effective.log.keepFiles} retentionDays=${effective.log.retentionDays}`,
           `floors: ${JSON.stringify(effective.floors)}`,

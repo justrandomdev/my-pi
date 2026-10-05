@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchRules, protectedPatterns, ruleMatches, touchesGatePaths, type Rule } from "./rules.js";
+import { grantPattern, matchRules, protectedPatterns, ruleMatches, touchesGatePaths, type Rule } from "./rules.js";
 
 const HOME = "/home/op";
 
@@ -155,5 +155,65 @@ describe("rule matching", () => {
       { action: "deny", pattern: "~/.ssh/**" },
     ];
     expect(protectedPatterns(rules)).toEqual(["~/.zshrc", "~/.ssh/**"]);
+  });
+
+  it("self-protection resolves file-tool targets against the cwd", () => {
+    const touches = (path: string, cwd?: string) => touchesGatePaths("read", { path }, HOME, cwd);
+    // the project gate dir, reached by a relative spelling
+    expect(touches(".pi/gate/config.json", "/proj")).toBe(true);
+    // the user gate dir, reached from home
+    expect(touches(".pi/agent/gate/config.json", "/home/op")).toBe(true);
+    // dot-detours and doubled slashes that normalize into a gate spelling
+    expect(touches(".pi/agent/../agent/gate/config.json", "/elsewhere")).toBe(true);
+    expect(touches(".pi//agent/gate/config.json", "/elsewhere")).toBe(true);
+    // relative spellings protect the gate even without a cwd
+    expect(touches(".pi/gate/config.json")).toBe(true);
+    // look-alikes pass
+    expect(touches("src/main.ts", "/proj")).toBe(false);
+    expect(touches(".pi/gatekeeper-notes.md", "/proj")).toBe(false);
+  });
+
+  it("a glob-free allow pattern matches shell text exactly, not as a prefix", () => {
+    const literal: Rule = { action: "allow", tools: ["bash"], pattern: "ls -la /tmp" };
+    expect(ruleMatches(literal, "bash", { command: "ls -la /tmp" }, HOME)).toBe(true);
+    expect(ruleMatches(literal, "bash", { command: "ls -la /tmpsecrets" }, HOME)).toBe(false);
+    expect(ruleMatches(literal, "bash", { command: "ls -la /tmp && ls -la /tmp" }, HOME)).toBe(true);
+    // glob-bearing allows keep their prefix semantics
+    const globbed: Rule = { action: "allow", tools: ["bash"], pattern: "npm test *" };
+    expect(ruleMatches(globbed, "bash", { command: "npm test -- --grep foo" }, HOME)).toBe(true);
+    // denies stay unanchored anywhere in the text
+    const deny: Rule = { action: "deny", pattern: "ls -la /tmp" };
+    expect(ruleMatches(deny, "bash", { command: "echo rm ls -la /tmp x" }, HOME)).toBe(true);
+  });
+
+  it("a glob-free deny on a file tool also covers everything beneath the pattern", () => {
+    const deny: Rule = { action: "deny", pattern: "~/creds" };
+    expect(ruleMatches(deny, "read", { path: "/home/op/creds/token" }, HOME)).toBe(true);
+    expect(ruleMatches(deny, "write", { path: "/home/op/creds" }, HOME)).toBe(true);
+    expect(ruleMatches(deny, "read", { path: "/home/op/creds-token" }, HOME)).toBe(false);
+    // allows stay exact: the widening is a deny-only asymmetry
+    const allow: Rule = { action: "allow", tools: ["read"], pattern: "~/creds" };
+    expect(ruleMatches(allow, "read", { path: "/home/op/creds/token" }, HOME)).toBe(false);
+    // glob-bearing denies do exactly what their glob says
+    const one: Rule = { action: "deny", pattern: "~/*" };
+    expect(ruleMatches(one, "read", { path: "/home/op/.config/a" }, HOME)).toBe(false);
+  });
+
+  it("file-tool targets resolve against the cwd, so absolute patterns catch relative spellings", () => {
+    const deny: Rule = { action: "deny", pattern: "~/.zshrc" };
+    expect(ruleMatches(deny, "read", { path: ".zshrc" }, HOME, "/home/op")).toBe(true);
+    expect(ruleMatches(deny, "read", { path: ".zshrc" }, HOME, "/elsewhere")).toBe(false);
+    // a hand-written relative pattern still matches its relative spelling
+    const relative: Rule = { action: "deny", pattern: "creds/token" };
+    expect(ruleMatches(relative, "read", { path: "creds/token" }, HOME, "/proj")).toBe(true);
+  });
+
+  it("grantPattern pins file-tool targets to cwd-absolute paths", () => {
+    expect(grantPattern("write", { path: "build/out.js" }, HOME, "/proj")).toBe("/proj/build/out.js");
+    expect(grantPattern("write", { path: "~/creds" }, HOME, "/proj")).toBe("/home/op/creds");
+    expect(grantPattern("write", { path: "/abs/out.js" }, HOME, "/proj")).toBe("/abs/out.js");
+    // no cwd: a relative target produces no grant, not a user-global relative rule
+    expect(grantPattern("write", { path: "build/out.js" }, HOME)).toBeUndefined();
+    expect(grantPattern("bash", { command: "npm test" }, HOME, "/proj")).toBe("npm test");
   });
 });

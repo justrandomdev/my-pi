@@ -33,7 +33,7 @@ The human who approves or denies a call at the ask step.
 _Avoid_: user (collides with "user level")
 
 **Grant**:
-An operator approval persisted as a rule: once, or always-for-this-pattern.
+An operator approval persisted as a rule: always-for-this-pattern — the exact command text, or the cwd-absolute path for file tools.
 _Avoid_: permission, whitelist entry
 
 **Protected path**:

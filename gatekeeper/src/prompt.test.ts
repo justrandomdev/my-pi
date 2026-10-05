@@ -80,6 +80,7 @@ describe("gate prompt component", () => {
     for (const [key, expected] of [
       ["\x1b", "deny"],
       ["n", "deny"],
+      ["s", "allow-session"],
       ["a", "allow-always"],
     ] as const) {
       const outcomes: string[] = [];

@@ -9,7 +9,7 @@ const HOME = "/home/op";
 function makeDeps(overrides: {
   config?: Partial<GatekeeperConfig>;
   classify?: (input: any) => Promise<ClassificationResult>;
-  askOperator?: (prompt: any) => Promise<"allow-once" | "allow-always" | "deny" | "no-ui">;
+  askOperator?: (prompt: any) => Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui">;
   addGrant?: (rule: Rule) => Promise<void>;
 } = {}): { deps: GateDeps; log: any[]; notified: string[]; grants: Rule[]; classifyCalls: any[] } {
   const log: any[] = [];
@@ -278,7 +278,8 @@ describe("the gate", () => {
     await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "read the file" });
     const state = classifyCalls[0];
     expect(Object.keys(state)).toEqual(["tool", "args", "task", "protectedPaths", "policy"]);
-    expect(state.protectedPaths).toEqual(["~/creds"]);
+    // the gate's own dirs ride along as a backstop (ADR-0003)
+    expect(state.protectedPaths).toEqual(["/home/op/.pi/agent/gate", "~/creds"]);
     expect(state.args).toContain("/tmp/a");
   });
 
@@ -360,5 +361,120 @@ describe("the gate", () => {
     const huge = { path: "/tmp/a", content: "x".repeat(50000) };
     await gate.decide({ tool: "write", args: huge, task: "t" });
     expect(classifyCalls[0].args.length).toBeLessThanOrEqual(4100);
+  });
+
+  it("write and edit contents never reach the model state or the log; the operator keeps a preview", async () => {
+    const asked: any[] = [];
+    const { deps, log, classifyCalls } = makeDeps({
+      classify: async () => classifyResult("safe", 0.99),
+      askOperator: async (p) => {
+        asked.push(p);
+        return "deny";
+      },
+    });
+    const gate = createGate(deps);
+    const secret = "const apiKey = 'hunter2';";
+    await gate.decide({ tool: "write", args: { path: "/tmp/a", content: secret }, task: "t" });
+    expect(classifyCalls[0].args).not.toContain("hunter2");
+    expect(JSON.parse(classifyCalls[0].args).content).toBe(`<${secret.length} chars omitted>`);
+    expect(log[0].args).not.toContain("hunter2");
+    // the operator prompt keeps its capped preview — the operator is human
+    expect(asked[0].argsSummary).toContain("hunter2");
+  });
+
+  it("edit's nested edits[] old/new text is redacted recursively", async () => {
+    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("unsafe", 0.99) });
+    const gate = createGate(deps);
+    await gate.decide({
+      tool: "edit",
+      args: { path: "/tmp/a", edits: [{ oldText: "hunter2", newText: "hunter3" }] },
+      task: "t",
+    });
+    expect(classifyCalls[0].args).not.toContain("hunter2");
+    expect(classifyCalls[0].args).not.toContain("hunter3");
+    expect(classifyCalls[0].args).toContain("/tmp/a");
+  });
+
+  it("operator allow-once is never cached — an identical re-issued call asks again", async () => {
+    const asked: any[] = [];
+    const { deps, classifyCalls } = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => {
+        asked.push(1);
+        return "allow-once";
+      },
+    });
+    const gate = createGate(deps);
+    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(first.action).toBe("allow");
+    expect(first.source).toBe("operator");
+    expect(second.source).toBe("operator"); // not "cache": allow-once means once
+    expect(asked).toHaveLength(2);
+    expect(classifyCalls).toHaveLength(2);
+  });
+
+  it("operator allow-for-session caches the approval for identical calls in the task", async () => {
+    const asked: any[] = [];
+    const { deps, classifyCalls } = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => {
+        asked.push(1);
+        return "allow-session";
+      },
+    });
+    const gate = createGate(deps);
+    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(first.source).toBe("operator");
+    expect(second.action).toBe("allow");
+    expect(second.source).toBe("cache");
+    expect(asked).toHaveLength(1);
+    expect(classifyCalls).toHaveLength(1);
+  });
+
+  it("operator denies are cached — a re-issued denied call does not nag the operator", async () => {
+    const asked: any[] = [];
+    const { deps } = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => {
+        asked.push(1);
+        return "deny";
+      },
+    });
+    const gate = createGate(deps);
+    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(first.action).toBe("block");
+    expect(second.action).toBe("block");
+    expect(second.source).toBe("cache");
+    expect(asked).toHaveLength(1);
+  });
+
+  it("the model state carries the session's gate dirs as protected paths", async () => {
+    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
+    const gate = createGate(deps);
+    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t", cwd: "/proj" });
+    expect(classifyCalls[0].protectedPaths).toContain("/home/op/.pi/agent/gate");
+    expect(classifyCalls[0].protectedPaths).toContain("/proj/.pi/gate");
+  });
+
+  it("an allow-always file grant pins the cwd-absolute path, and is not cached", async () => {
+    const asked: any[] = [];
+    const { deps, grants } = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => {
+        asked.push(1);
+        return "allow-always";
+      },
+    });
+    const gate = createGate(deps);
+    const first = await gate.decide({ tool: "write", args: { path: "build/out.js", content: "x" }, task: "t", cwd: "/proj" });
+    expect(first.action).toBe("allow");
+    expect(grants).toEqual([{ action: "allow", tools: ["write"], pattern: "/proj/build/out.js" }]);
+    // the grant rule answers repetition at the rule layer, not the session cache
+    const second = await gate.decide({ tool: "write", args: { path: "build/out.js", content: "x" }, task: "t", cwd: "/proj" });
+    expect(second.source).toBe("operator"); // not "cache"
+    expect(asked).toHaveLength(2);
   });
 });

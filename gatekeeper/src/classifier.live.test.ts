@@ -10,7 +10,7 @@ describe.skipIf(!live)("live System One endpoint", () => {
     "classifies a trivial call",
     async () => {
       const classifier = createSystemOneClassifier({
-        baseUrl: process.env.GATEKEEPER_BASE_URL ?? "http://localhost:11434",
+        url: process.env.GATEKEEPER_URL ?? "http://localhost:11434/v1/systemone",
         model: process.env.GATEKEEPER_MODEL ?? "clef-flash",
         timeoutMs: Number(process.env.GATEKEEPER_TIMEOUT ?? 60_000),
         keepAlive: "10m",

@@ -28,10 +28,10 @@ const cannedAnswer = {
 };
 
 describe("System One classifier", () => {
-  it("posts to /v1/systemone with the policy as instructions, safe listed first", async () => {
+  it("posts to the configured endpoint URL with the policy as instructions, safe listed first", async () => {
     const { requests, fetchFn } = stubEndpoint(() => cannedAnswer);
     const classifier = createSystemOneClassifier(
-      { baseUrl: "http://localhost:11434", model: "clef-flash", timeoutMs: 5000, keepAlive: "10m" },
+      { url: "http://localhost:11434/v1/systemone", model: "clef-flash", timeoutMs: 5000, keepAlive: "10m" },
       fetchFn,
     );
     const result = await classifier.classify({
@@ -66,7 +66,7 @@ describe("System One classifier", () => {
   it("sends the API key as a bearer token when configured", async () => {
     const { requests, fetchFn } = stubEndpoint(() => cannedAnswer);
     const classifier = createSystemOneClassifier(
-      { baseUrl: "https://jev.example.com", model: "jev-1", apiKey: "k-123", timeoutMs: 5000, keepAlive: "10m" },
+      { url: "https://jev.example.com/v1/systemone", model: "jev-1", apiKey: "k-123", timeoutMs: 5000, keepAlive: "10m" },
       fetchFn,
     );
     await classifier.classify({ tool: "read", args: "{}", task: "t", protectedPaths: [], policy: "p" });
@@ -74,12 +74,33 @@ describe("System One classifier", () => {
     expect(requests[0].url).toBe("https://jev.example.com/v1/systemone");
   });
 
+  it("omits keep_alive when keepAlive is empty, for strict endpoints", async () => {
+    const { requests, fetchFn } = stubEndpoint(() => cannedAnswer);
+    const classifier = createSystemOneClassifier(
+      { url: "https://api.cloudflare.com/v1/systemone", model: "clef-flash", keepAlive: "", timeoutMs: 5000 },
+      fetchFn,
+    );
+    await classifier.classify({ tool: "read", args: "{}", task: "t", protectedPaths: [], policy: "p" });
+    expect(requests[0].body.keep_alive).toBeUndefined();
+  });
+
+  it("accepts the answer wrapped in a result envelope (Cloudflare-style)", async () => {
+    const { fetchFn } = stubEndpoint(() => ({ result: cannedAnswer }));
+    const classifier = createSystemOneClassifier(
+      { url: "https://api.cloudflare.com/v1/systemone", model: "clef-flash", timeoutMs: 5000, keepAlive: "" },
+      fetchFn,
+    );
+    const result = await classifier.classify({ tool: "read", args: "{}", task: "t", protectedPaths: [], policy: "p" });
+    expect(result.choice).toBe("unsafe");
+    expect(result.confidence).toBe(0.95);
+  });
+
   it("propagates HTTP and network errors to the decision layer", async () => {
     const failing = (async () => {
       throw new Error("connect ECONNREFUSED");
     }) as typeof fetch;
     const classifier = createSystemOneClassifier(
-      { baseUrl: "http://localhost:11434", model: "clef-flash", timeoutMs: 5000, keepAlive: "10m" },
+      { url: "http://localhost:11434/v1/systemone", model: "clef-flash", timeoutMs: 5000, keepAlive: "10m" },
       failing,
     );
     await expect(

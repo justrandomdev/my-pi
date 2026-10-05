@@ -5,7 +5,7 @@
 
 import type { ClassifyInput, Classification, ClassificationResult } from "./classifier.js";
 import type { GatekeeperConfig } from "./config.js";
-import { grantPattern, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
+import { gateDirs, grantPattern, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
 
 export type DecisionSource = "disabled" | "protected" | "rule" | "model" | "operator" | "cache" | "fail";
 
@@ -51,7 +51,7 @@ export interface GateDeps {
   home: string;
   getConfig(): GatekeeperConfig;
   classify(input: ClassifyInput): Promise<ClassificationResult>;
-  askOperator(prompt: OperatorPromptInfo): Promise<"allow-once" | "allow-always" | "deny" | "no-ui">;
+  askOperator(prompt: OperatorPromptInfo): Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui">;
   notify(line: string): void;
   writeLog(record: LogRecord): void;
   addGrant(rule: Rule): Promise<void>;
@@ -65,6 +65,25 @@ function cap(text: string, budget: number): string {
   return text.length <= budget ? text : `${text.slice(0, budget)}…`;
 }
 
+/** Argument keys that carry file contents: write's `content`, edit's
+ *  `edits[].oldText`/`newText`. They are redacted from the state the model
+ *  sees and from the decision log (ADR-0002: the judge is not steered by
+ *  contents; the log never records them). The operator prompt keeps its
+ *  capped preview — the operator is human. */
+const CONTENT_KEYS = new Set(["content", "oldText", "newText"]);
+
+function redactContent(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactContent);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value)) {
+      out[key] = typeof v === "string" && CONTENT_KEYS.has(key) ? `<${v.length} chars omitted>` : redactContent(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 export function createGate(deps: GateDeps): Gate {
   const sessionCache = new Map<string, Decision>();
 
@@ -73,6 +92,7 @@ export function createGate(deps: GateDeps): Gate {
       const config = deps.getConfig();
 
       const argsSummary = cap(JSON.stringify(args ?? {}), config.log.truncateArgsBytes);
+      const logArgs = cap(JSON.stringify(redactContent(args ?? {})), config.log.truncateArgsBytes);
 
       // Self-protection (ADR-0003): before every rule, overridable by none.
       const cacheKey = config.cache ? `${tool}||${JSON.stringify(args)}||${task}` : "";
@@ -91,7 +111,7 @@ export function createGate(deps: GateDeps): Gate {
         }
         deps.writeLog({
           tool,
-          args: argsSummary,
+          args: logArgs,
           action: decision.action,
           source: decision.source,
           classification: decision.classification,
@@ -122,7 +142,7 @@ export function createGate(deps: GateDeps): Gate {
       }
 
       // Layer 1: static rules. First hit wins; no model call.
-      const rule = matchRules(config.rules, tool, args, deps.home);
+      const rule = matchRules(config.rules, tool, args, deps.home, cwd);
       if (rule) {
         return finish({
           action: rule.action === "allow" ? "allow" : "block",
@@ -136,7 +156,10 @@ export function createGate(deps: GateDeps): Gate {
         return finish({ ...sessionCache.get(cacheKey)!, source: "cache" });
       }
 
-      // Layer 3+ decisions are cacheable; rule hits are not (they never re-classify).
+      // Model/fail decisions and operator denies or session allows are
+      // cacheable; rule hits are not (they never re-classify), and neither
+      // are operator allow-once/allow-always — "once" means once, and the
+      // grant rule answers allow-always repetition.
       // `finish` notifies + logs; `settle` adds the cache layer on top.
       const settle = (decision: Decision): Decision => {
         if (config.cache) sessionCache.set(cacheKey, decision);
@@ -149,9 +172,11 @@ export function createGate(deps: GateDeps): Gate {
       try {
         classification = await deps.classify({
           tool,
-          args: cap(JSON.stringify(args ?? {}), config.stateBudgetChars),
+          args: cap(JSON.stringify(redactContent(args ?? {})), config.stateBudgetChars),
           task: cap(task, config.stateBudgetChars),
-          protectedPaths: protectedPatterns(config.rules),
+          // The gate's own dirs ride along as a backstop for obfuscated
+          // spellings that slip past the static self-protection check.
+          protectedPaths: [...gateDirs(deps.home, cwd), ...protectedPatterns(config.rules)],
           policy: config.policy,
         });
       } catch (error) {
@@ -202,7 +227,7 @@ export function createGate(deps: GateDeps): Gate {
       }
 
       if (outcome === "allow-always") {
-        const pattern = grantPattern(tool, args);
+        const pattern = grantPattern(tool, args, deps.home, cwd);
         if (pattern) {
           try {
             await deps.addGrant({ action: "allow", tools: [tool], pattern });
@@ -210,18 +235,26 @@ export function createGate(deps: GateDeps): Gate {
             // Allow the call and tell the operator; the gate must not silently swallow the failure.
             const message = `grant rule failed to persist: ${(error as Error).message}`;
             deps.notify(`gate › ${tool}: ${message}`);
-            return settle({
+            // Not cached: the grant failed to persist, so the next identical
+            // call must ask again, as the reason promises.
+            return finish({
               action: "allow",
               source: cause,
               reason: `${reason}; ${message}; you will be asked again next time`,
             });
           }
-          return settle({ action: "allow", source: cause, reason: `${reason}; operator granted always: ${pattern}` });
+          // Not cached: the grant rule answers repetition at the rule layer.
+          return finish({ action: "allow", source: cause, reason: `${reason}; operator granted always: ${pattern}` });
         }
-        return settle({ action: "allow", source: cause, reason: `${reason}; operator allowed once (no grant pattern derivable)` });
+        return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed once (no grant pattern derivable)` });
       }
 
-      return settle({ action: "allow", source: cause, reason: `${reason}; operator allowed once` });
+      if (outcome === "allow-session") {
+        return settle({ action: "allow", source: cause, reason: `${reason}; operator allowed for the session` });
+      }
+
+      // Allow once: never cached — an identical re-issued call asks again.
+      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed once` });
     },
   };
 }

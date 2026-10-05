@@ -21,7 +21,7 @@ Configuration is done two ways: **slash commands** (operator-run — type them y
 - `/gate:config` — show effective config, or set keys:
   - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block
   - `/gate:config set floors.bash true` — re-add an ask floor (floored tools always ask unless a rule allows them)
-  - `endpoint.model`, `endpoint.baseUrl`, `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
+  - `endpoint.model`, `endpoint.url` (full request URL), `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
   - `log.level`, `log.maxLines`, `log.keepFiles`, `log.retentionDays` — decision-log behavior
   - append `--project` to set at project level (project overrides user, per ADR-0001)
 - `/gate:log` — review decisions: `/gate:log 50 bash` tails the last 50 bash decisions. Use this to investigate why a call was allowed, blocked, or asked.

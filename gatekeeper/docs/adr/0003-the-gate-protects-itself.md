@@ -7,9 +7,8 @@ A compromised model reaches the gate's config through the very tool calls the ga
 - **Ship deny rules for the gate paths as defaults**: rejected — rules evaluate project-first (ADR-0001), so a project or user rule could sit ahead of the deny, and that override would itself be written through the gate. A code-level check has no such window.
 - **Rely on ask floors**: rejected — floors are per-tool config the operator can lift (and did, for bash).
 
-## Consequences
-
 - Self-protection precedes the `enabled` check: it holds even while the gate is disabled, so a disabled gate cannot be used as a door to re-enable the gate with weakened rules. Only a human edit can disable the gate.
+- File-tool targets resolve against the working directory before comparison with the gate dirs, so a relative spelling (`.pi/gate/config.json`, or a `.pi/agent/../agent/gate` dot-detour) is caught like an absolute one. Relative spellings that cannot resolve to a gate dir still match the literal gate-dir prefixes.
 - Deliberate tension with ADR-0001: project-level config cannot loosen self-protection. ADR-0001 governs the operator's choices about their repos; this is an invariant of the tool itself. The distinction holds because the operator never needs an agent tool call to configure the gate — slash commands are operator-run, and a manual edit happens outside the gate entirely.
 - The operator can still disable the gate by hand: editing the config to `enabled: false` is a human action, not an agent tool call. The human's hands are outside the gate by construction.
 - Residual: editing the extension's source in a development repo is not covered — source edits rely on the `edit`/`write` ask floors and operator review (see the README's security section).

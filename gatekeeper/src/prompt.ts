@@ -1,12 +1,12 @@
 /**
  * The gate's operator prompt: a rounded-border box with the classification
  * line colored green (safe), red (unsafe), or yellow (unsure or unavailable).
- * Keys: y = allow once, a = allow always, n/esc = deny.
+ * Keys: y = allow once, s = allow for session, a = allow always, n/esc = deny.
  */
 
 import type { Component } from "@earendil-works/pi-tui";
 
-export type GatePromptResult = "allow-once" | "allow-always" | "deny";
+export type GatePromptResult = "allow-once" | "allow-session" | "allow-always" | "deny";
 export type GateClassification = "safe" | "unsafe" | "unsure";
 
 export interface GatePromptInfo {
@@ -81,6 +81,7 @@ export function createGatePrompt(info: GatePromptInfo) {
       invalidate: () => {},
       handleInput: (data: string) => {
         if (data === "y") settle("allow-once");
+        else if (data === "s") settle("allow-session");
         else if (data === "a") settle("allow-always");
         else if (data === "n" || data === "\x1b") settle("deny");
       },
@@ -98,7 +99,7 @@ export function createGatePrompt(info: GatePromptInfo) {
         plain.push(`Reason: ${info.reason}`);
         for (const line of wrap(info.argsSummary, inner - 2)) plain.push(line);
         plain.push("");
-        plain.push("y: allow once · a: allow always · n/esc: deny");
+        plain.push("y: allow once · s: allow for session · a: allow always · n/esc: deny");
 
         const lines: string[] = [top];
         for (const text of plain) {

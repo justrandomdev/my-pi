@@ -6,7 +6,7 @@ describe("config resolution", () => {
     expect(DEFAULT_CONFIG.threshold).toBe(0.85);
     expect(DEFAULT_CONFIG.rules).toEqual([{ action: "allow", tools: ["ls", "find"] }]);
     expect(DEFAULT_CONFIG.floors).toEqual({ bash: true, powershell: true, edit: true, write: true });
-    expect(DEFAULT_CONFIG.endpoint.baseUrl).toBe("http://localhost:11434");
+    expect(DEFAULT_CONFIG.endpoint.url).toBe("http://localhost:11434/v1/systemone");
     expect(DEFAULT_CONFIG.endpoint.model).toBe("clef-flash");
     expect(DEFAULT_CONFIG.endpoint.timeoutMs).toBe(30_000);
     expect(DEFAULT_CONFIG.failMode).toBe("ask");
@@ -42,7 +42,7 @@ describe("config resolution", () => {
     });
     expect(config.endpoint.model).toBe("clef");
     expect(config.endpoint.timeoutMs).toBe(1000);
-    expect(config.endpoint.baseUrl).toBe("http://localhost:11434");
+    expect(config.endpoint.url).toBe("http://localhost:11434/v1/systemone");
   });
 
   it("project rules evaluate before user rules (ADR-0001)", () => {

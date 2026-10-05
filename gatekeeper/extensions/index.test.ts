@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGatekeeper } from "./index.js";
@@ -130,7 +130,7 @@ describe("gatekeeper extension", () => {
     const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
     const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
     expect(env.ui.selected).toHaveLength(1);
-    expect(env.ui.selected[0].options).toEqual(["Allow once", "Allow always", "Deny"]);
+    expect(env.ui.selected[0].options).toEqual(["Allow once", "Allow for session", "Allow always", "Deny"]);
     expect(env.ui.selected[0].title).toContain("bash");
     // the stub operator picks Deny
     expect(result?.block).toBe(true);
@@ -383,5 +383,64 @@ describe("gatekeeper extension", () => {
     await handler("add allow \"*\"", ctx);
     const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
     expect(cfg.rules).toContainEqual({ action: "allow", pattern: "*" });
+  });
+
+  it("a quoted multi-token pattern arrives whole: add allow \"ls ?*\" --tool bash", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:rules")!.handler;
+    await handler('add allow "ls ?*" --tool bash', env.ctx());
+    const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg.rules).toContainEqual({ action: "allow", tools: ["bash"], pattern: "ls ?*" });
+  });
+
+  it("gate:config set rejects unknown keys, rules, and invalid values without writing", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:config")!.handler;
+    await handler("set threshold abc", env.ctx());
+    await handler("set rules []", env.ctx());
+    await handler("set nonsense 1", env.ctx());
+    await handler("set log.maxLines -5", env.ctx());
+    await handler("set enabled maybe", env.ctx());
+    let cfg: any = {};
+    try {
+      cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    } catch {
+      // no file at all — nothing was ever written
+    }
+    expect(cfg.rules).toBeUndefined();
+    expect(cfg.threshold).toBeUndefined();
+    expect(cfg.nonsense).toBeUndefined();
+    expect(cfg.log).toBeUndefined();
+    expect(cfg.enabled).toBeUndefined();
+    expect(env.ui.notified.some((n) => n.includes("unknown key"))).toBe(true);
+    expect(env.ui.notified.some((n) => n.includes("must be a number between 0 and 1"))).toBe(true);
+    expect(env.ui.notified.some((n) => n.includes("use gate:rules"))).toBe(true);
+  });
+
+  it("self-protection blocks relative reads of the gate's own config and log", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const project = await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: ".pi/gate/config.json" } });
+    expect(project?.block).toBe(true);
+    expect(project?.reason).toContain("protects its own");
+    const user = await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: ".pi/agent/gate/config.json" } });
+    expect(user?.block).toBe(true);
+    expect(env.requests).toHaveLength(0);
+  });
+
+  it("the plain selector maps Allow for session to a cached session allow", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    env.ui.select = async (title: string, options: string[]): Promise<string | undefined> => {
+      env.ui.selected.push({ title, options });
+      return options[1]; // "Allow for session"
+    };
+    const first = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
+    expect(first).toBeUndefined();
+    const second = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
+    expect(second).toBeUndefined();
+    expect(env.ui.selected).toHaveLength(1); // the second came from the session cache
   });
 });

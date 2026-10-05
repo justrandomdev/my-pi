@@ -23,7 +23,7 @@ export interface ClassifyInput {
 }
 
 export interface ClassifierEndpoint {
-  baseUrl: string;
+  url: string;
   model: string;
   apiKey?: string;
   timeoutMs: number;
@@ -44,7 +44,8 @@ interface SystemOneAnswer {
 function buildRequestBody(endpoint: ClassifierEndpoint, input: ClassifyInput) {
   return {
     model: endpoint.model,
-    keep_alive: endpoint.keepAlive,
+    // Ollama-only; strict endpoints reject extra fields, so "" omits it.
+    ...(endpoint.keepAlive ? { keep_alive: endpoint.keepAlive } : {}),
     // State invariant (ADR-0002): tool name, agent arguments, operator task,
     // protected paths. Never file contents, fetched text, or history.
     state: {
@@ -76,7 +77,7 @@ export function createSystemOneClassifier(
 ): Classifier {
   return {
     async classify(input: ClassifyInput): Promise<ClassificationResult> {
-      const url = `${endpoint.baseUrl.replace(/\/$/, "")}/v1/systemone`;
+      const url = endpoint.url;
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (endpoint.apiKey) headers.authorization = `Bearer ${endpoint.apiKey}`;
       const response = await fetchFn(url, {
@@ -88,8 +89,12 @@ export function createSystemOneClassifier(
       if (!response.ok) {
         throw new Error(`systemone endpoint ${response.status}: ${await response.text().catch(() => "")}`.trim());
       }
-      const data = (await response.json()) as { answers: { safety: SystemOneAnswer } };
-      const answer = data.answers?.safety;
+      // Bare answer (Ollama) or wrapped in a `result` envelope (e.g. Cloudflare).
+      const data = (await response.json()) as {
+        answers?: { safety?: SystemOneAnswer };
+        result?: { answers?: { safety?: SystemOneAnswer } };
+      };
+      const answer = data.answers?.safety ?? data.result?.answers?.safety;
       if (!answer || typeof answer.choice !== "string") {
         throw new Error("systemone endpoint returned no safety answer");
       }

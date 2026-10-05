@@ -10,17 +10,17 @@ Every tool call passes through the gate, in order:
 
 1. **Self-protection** — calls touching the gate's own config or log are always denied. Not overridable by any rule. See [ADR-0003](docs/adr/0003-the-gate-protects-itself.md).
 2. **Rules** — ordered allow/deny entries (project rules first, then user, then shipped defaults). First hit wins; no model call, no prompt.
-3. **Session cache** — an identical call in the same task reuses its decision.
+3. **Session cache** — an identical call in the same task reuses its decision. Operator approvals enter it only via *Allow for session* (and denies are always cached, so re-issued denied calls don't nag); *Allow once* and *Allow always* are never cached.
 4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score.
    - `safe` ≥ threshold → auto-allow; `unsafe` ≥ threshold → auto-block; everything else → operator.
    - **Ask floors**: tools with a floor (default: `bash`, `powershell`, `edit`, `write`) always reach the operator unless a rule allows them — the model can block or escalate, never auto-allow.
-5. **The operator** — a bordered prompt (classification colored green/red/yellow) with `y: allow once · a: allow always · n/esc: deny`. "Allow always" writes a grant rule.
+5. **The operator** — a bordered prompt (classification colored green/red/yellow) with `y: allow once · s: allow for session · a: allow always · n/esc: deny`. "Allow always" writes a grant rule.
 
 Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`failMode: block`, for headless use).
 
 ## Security model
 
-- **The agent cannot configure the gate.** Every agent tool call touching the gate's config or decision-log paths is denied before any rule — a compromised model cannot neuter the gate through the gate. This holds even while the gate is `enabled: false`; only a human edit can change that state.
+- **The agent cannot configure the gate.** Every agent tool call touching the gate's config or decision-log paths is denied before any rule — a compromised model cannot neuter the gate through the gate. File-tool targets resolve against the working directory, so relative spellings (`.pi/gate/config.json`) are caught too. This holds even while the gate is `enabled: false`; only a human edit can change that state.
 - **Slash commands are operator-run** — typed by you in the TUI, never issued by the agent.
 - **Manual edits are human actions** — your editor is outside the gate.
 - **Remote endpoints are data egress**: configuring a remote clef/Jev endpoint sends every gated call's tool name, arguments, and current task to that service (ADR-0002). Local-first is the default.
@@ -46,7 +46,7 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
   "enabled": true,
   "threshold": 0.85,
   "endpoint": {
-    "baseUrl": "http://localhost:11434",
+    "url": "http://localhost:11434/v1/systemone",
     "model": "clef-flash",
     "apiKey": "…",
     "timeoutMs": 30000,
@@ -72,11 +72,11 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 |---|---|---|
 | `enabled` | `true` | `false` passes everything through ungated — except self-protection, which applies whenever the gate is loaded. |
 | `threshold` | `0.85` | Minimum confidence for autonomous allow/block. Below it: operator. |
-| `endpoint.baseUrl` | `http://localhost:11434` | Base of a Jev/System One-compatible service. The gate calls `${baseUrl}/v1/systemone`. |
+| `endpoint.url` | `http://localhost:11434/v1/systemone` | Full request URL of a Jev/System One-compatible service — the gate POSTs here verbatim. |
 | `endpoint.model` | `clef-flash` | Any model the endpoint serves (`clef`, a remote Jev, …). |
 | `endpoint.apiKey` | — | Bearer token for remote services. Set this by manual edit only — the `set` command echoes values into notifications. |
 | `endpoint.timeoutMs` | `30000` | Cold-start load of a large local model takes tens of seconds; warm calls are sub-second. |
-| `endpoint.keepAlive` | `"10m"` | Keeps the model warm between calls. |
+| `endpoint.keepAlive` | `"10m"` | Ollama-only; keeps the model warm between calls. Set `""` for strict endpoints (e.g. Cloudflare) that reject extra fields. |
 | `policy` | built-in text | What counts as unsafe — sent to the model as classification instructions. |
 | `floors` | bash, powershell, edit, write floored | Per-tool ask floor. `true` = always ask unless a rule allows. |
 | `failMode` | `"ask"` | Model down/timeout: `"ask"` routes to the operator, `"block"` denies (headless). |
@@ -102,19 +102,19 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 
 Matching is asymmetric for safety:
 
-- **File tools** (`read`, `edit`, `write`): the pattern matches the path target, fully (`~/.zshrc` protects exactly that file; `~/*` one level; `~/**` everything below).
+- **File tools** (`read`, `edit`, `write`): the pattern matches the path target, fully (`~/.zshrc` protects exactly that file; `~/*` one level; `~/**` everything below). Targets resolve against the working directory, so absolute patterns catch relative spellings; a glob-free **deny** also covers everything beneath the pattern (`~/creds` protects `~/creds/token` too — a file can never sit beneath a file, so this widens directories only).
 - **Shell commands** (`bash`, `powershell`) are split into components on `&&`, `||`, `;`, `|`, `&`, and newlines, quotes respected:
-  - an **allow** must match *every* component — `ls /a && rm -rf /b` fails an `ls ?*` rule;
+  - an **allow** must match *every* component — `ls /a && rm -rf /b` fails an `ls ?*` rule; a glob-free allow pattern (`ls -la /tmp`) matches the component *exactly* — `ls -la /tmpsecrets` does not ride through (write `ls -la /tmp *` for prefix behavior);
   - a **deny** matches if *any* component matches — `ls /a && cat ~/.creds` is denied by `~/creds`;
   - `*` and `**` cross everything (spaces, slashes); a **leading `*`** opts an allow out of start-anchoring (`*ls*` matches anywhere in a component);
   - **command substitution** (`$(…)`, backticks, `>(…)`) and **file-target redirects** (`> out`, `>> file`, `< in`) defeat an allow — the call falls to the model gate. Redirects to `/dev/null` and fd duplication (`2>&1`) are inert.
 - **Other tools**: like shell text, over the serialized arguments.
 
-Operators approve "always" from a prompt to write a grant rule (exact command or path) at user level.
+Operators approve "always" from a prompt to write a grant rule (exact command, or the cwd-absolute path for file tools) at user level — grants persist user-globally, which is why file-tool targets are pinned to the project that approved them.
 
 ### The decision log
 
-`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, truncated arguments, action, source (`rule` / `model` / `operator` / `cache` / `fail` / `protected` / `disabled`), classification, confidence, and the reason. It never contains file contents or full unbounded arguments — but note that secrets typed *into commands* are arguments, and do land here truncated.
+`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, truncated arguments, action, source (`rule` / `model` / `operator` / `cache` / `fail` / `protected` / `disabled`), classification, confidence, and the reason. `write` contents and `edit` old/new text are redacted to `<N chars omitted>` before they reach the model state (ADR-0002) or this log, and arguments are truncated — but note that secrets typed *into commands* are arguments, and do land here truncated.
 
 ## Slash commands
 
@@ -122,7 +122,7 @@ All commands are operator-run; the agent cannot invoke them.
 
 ### `/gate` — status
 
-Shows the effective posture: enabled, endpoint (model @ baseUrl), threshold, floors, fail mode, rule count, active log path, and session statistics (allowed / blocked / asked).
+Shows the effective posture: enabled, endpoint (model @ url), threshold, floors, fail mode, rule count, active log path, and session statistics.
 
 ### `/gate:rules` — manage rules
 
@@ -142,7 +142,7 @@ Shows the effective posture: enabled, endpoint (model @ baseUrl), threshold, flo
 /gate:config                                    show effective config
 /gate:config set threshold 0.9                  user-level key
 /gate:config set endpoint.model clef            dotted endpoint keys
-/gate:config set endpoint.baseUrl https://…
+/gate:config set endpoint.url https://…
 /gate:config set endpoint.timeoutMs 60000
 /gate:config set floors.bash true               re-add a lifted ask floor
 /gate:config set log.level project              log into the repo
@@ -166,7 +166,7 @@ Every decision is also shown live as a one-line transparency notification (defau
 The gate speaks the System One API (`/v1/systemone`), compatible with Ollama's decision models and remote Jev services:
 
 ```json
-{ "endpoint": { "baseUrl": "http://localhost:11434", "model": "clef-flash" } }
+{ "endpoint": { "url": "http://localhost:11434/v1/systemone", "model": "clef-flash" } }
 ```
 
-Swap `model` for `clef` (larger, more accurate) or point `baseUrl` at a remote service with an `apiKey`. Decision endpoints accept the tool name, arguments, and current task — nothing else (ADR-0002's judge-steering invariant).
+Swap `model` for `clef` (larger, more accurate) or point `url` at a remote service with an `apiKey`. Decision endpoints accept the tool name, arguments, and current task — nothing else (ADR-0002's judge-steering invariant).

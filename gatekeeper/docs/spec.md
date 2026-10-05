@@ -20,7 +20,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 8. As an operator, I want to set the confidence threshold, so that I control how much autonomy the model gets.
 9. As an operator, I want static rules evaluated before the model, so that known decisions are instant and cost nothing.
 10. As an operator, I want to add, remove, view, and test rules via slash command, so that I manage the rule set without editing JSON by hand.
-11. As an operator, I want approvals to become grants — once, or always-for-this-pattern — so that repeated prompts for the same thing stop.
+11. As an operator, I want approvals to become grants — once, for the session, or always-for-this-pattern — so that repeated prompts for the same thing stop.
 12. As an operator, I want protected paths to match anywhere in a shell command's text, so that `cat`, pipelines, and inline scripts referencing them are caught.
 13. As an operator, I want protected paths to match file-tool targets, so that `read`/`edit`/`write` on protected files is denied statically.
 14. As an operator, I want protected paths included in the state the model sees, so that indirect access attempts are judged with that knowledge.
@@ -35,7 +35,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 23. As an operator, I want to configure the model endpoint — local Ollama `clef-flash` by default; remote clef, remote Jev, or any compatible service — so that I choose where classification runs.
 24. As an operator, I want remote endpoints to make their egress explicit, so that sending call data off-machine is a conscious choice.
 25. As an operator, I want model failure or timeout to route to me (or fail-block in headless mode), so that the gate never silently opens.
-26. As an operator, I want decisions cached for the session, so that retries don't re-pay latency.
+26. As an operator, I want decisions cached for the session, so that retries don't re-pay latency — while operator "allow once" stays once (never cached), and denied calls don't re-nag me.
 27. As an operator, I want the operator prompt to show classification, confidence, tool, argument summary, and the model's reason, so that I can decide quickly and correctly.
 28. As an operator, I want to edit the policy text, so that "what counts as unsafe" fits my environment.
 29. As an operator, I want status and session statistics via slash command, so that I can see the gate's posture and activity at a glance.
@@ -46,7 +46,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 ## Implementation Decisions
 
 - Two-layer gate: static rules first (allow/deny, tool plus path/argument patterns, first hit wins, skipping the model), then the model gate for everything rules don't settle.
-- Self-protection (ADR-0003): agent tool calls touching the gate's own config or decision-log paths are always denied, before the enabled check and every rule, overridable by none. Shell text is matched with `$HOME` expansion, dot-segment normalization, and `cd`-target resolution; encoded path spellings fall through to the model gate. The operator configures the gate via operator-run slash commands or manual edits.
+- Self-protection (ADR-0003): agent tool calls touching the gate's own config or decision-log paths are always denied, before the enabled check and every rule, overridable by none. File-tool targets resolve against the cwd, and shell text is matched with `$HOME` expansion, dot-segment normalization, and `cd`-target resolution; encoded path spellings fall through to the model gate, which also sees the gate dirs as protected paths. The operator configures the gate via operator-run slash commands or manual edits.
 - A `gatekeeper-config` skill ships with the package: it tells the agent it cannot configure the gate, and carries the slash-command reference and manual-config paths so the agent can explain configuration to the user.
 - Decision matrix: `safe` at or above the threshold auto-allows; `unsafe` at or above auto-blocks; explicit `unsure` and anything below the threshold converge on ask. The threshold defaults to 0.85 and is configurable. Choice order lists `safe` first so ties fail toward asking.
 - Default posture is deny-all: the shipped allow rules cover `ls` and `find` only.
@@ -57,7 +57,7 @@ Gatekeeper: a pi plugin that gates every tool call through two layers. Static ru
 - Endpoint: a single active endpoint (base URL, model, optional API key, timeout defaulting to 30s — cold-start load of a large local model takes tens of seconds, warm calls are sub-second). Any Jev/System One-compatible service works; default is local Ollama `clef-flash` with `keep_alive` so the model stays warm. Failure or timeout routes to ask; a fail-block mode exists for headless use.
 - Caching and grants: decisions cache for the session keyed by tool, arguments, and task; approvals offer once or always (always writes a grant rule, user-level by default); denials cache for the session.
 - Transparency: one notify line per gated decision, including auto-allows.
-- Decision log: JSONL, one active log at the level the effective config selects (default user-level); rotation after a configurable line count (default 10,000, keeping 10 files); deletion of rotated files after a configurable age (default 30 days); arguments truncated (2KB) and file contents never logged.
+- Decision log: JSONL, one active log at the level the effective config selects (default user-level); rotation after a configurable line count (default 10,000, keeping 10 files); deletion of rotated files after a configurable age (default 30 days); arguments truncated (2KB) and file contents never logged — write/edit content keys are redacted to size placeholders before they reach the model state (ADR-0002) or the log.
 - Config: one config file per level; project overrides user per key (scalars) and in rule order (project rules evaluate before user rules, first hit wins).
 - Slash commands: `/gate` (status and session stats), `/gate:rules` (view/add/remove/test), `/gate:config` (threshold, model, retention, floors, levels), `/gate:log` (tail/filter).
 - Scope: replaces pi-guardrails entirely except its herdr integration.
