@@ -5,14 +5,16 @@
 
 import os from "node:os";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { configPaths, DEFAULT_CONFIG, resolveConfig, type DeepPartial, type GatekeeperConfig, type ScopedConfig } from "../src/config.js";
 import { createSystemOneClassifier } from "../src/classifier.js";
 import { createGate, type GateDeps, type OperatorPromptInfo } from "../src/decision.js";
 import { DecisionLog } from "../src/log.js";
 import { createGatePrompt, type GatePromptResult } from "../src/prompt.js";
-import { matchRules, type Rule } from "../src/rules.js";
+import { argsText, matchRules, type Rule } from "../src/rules.js";
+import { compileSecrets, compileUserSecrets, scanSecrets, type CompiledSecrets, type SecretsHit, type SecretsOverride } from "../src/secrets.js";
 
 export interface GatekeeperOptions {
   /** Overrides the home directory (config/log paths). Used by tests. */
@@ -48,12 +50,14 @@ const isOneOf = (...options: string[]) =>
 
 const CONFIG_KEYS: Record<string, (value: unknown) => string | undefined> = {
   enabled: isBoolean,
-  cache: isBoolean,
   threshold: isPortion,
   policy: isNonEmptyString,
   failMode: isOneOf("ask", "block"),
-  notify: isOneOf("always", "summary", "off"),
+  notify: isOneOf("always", "summary", "off", "debug"),
   stateBudgetChars: isPositiveInt,
+  "secrets.enabled": isBoolean,
+  "secrets.autoUpdate": isBoolean,
+  "secrets.source": isNonEmptyString,
   "endpoint.url": isNonEmptyString,
   "endpoint.model": isNonEmptyString,
   "endpoint.apiKey": isString,
@@ -66,7 +70,7 @@ const CONFIG_KEYS: Record<string, (value: unknown) => string | undefined> = {
   "log.truncateArgsBytes": isPositiveInt,
 };
 
-export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = {}): void {
+export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = {}): Promise<void> {
   const home = options.home ?? os.homedir();
   const fetchFn = options.fetchFn ?? fetch;
 
@@ -124,18 +128,169 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     return effective.log.level === "project" ? join(cwd, ".pi/gate") : join(home, ".pi/agent/gate");
   }
 
+  let cachedLogger: { key: string; logger: DecisionLog } | undefined;
   function logger(cwd: string): DecisionLog {
-    return new DecisionLog({
-      dir: logDir(cwd),
-      maxLines: effective.log.maxLines,
-      keepFiles: effective.log.keepFiles,
-      retentionDays: effective.log.retentionDays,
+    const key = [
+      logDir(cwd),
+      effective.log.maxLines,
+      effective.log.keepFiles,
+      effective.log.retentionDays,
+    ].join("|");
+    // One instance per resolved log config: the class caches its line
+    // count, so a fresh instance per decision would re-read the whole
+    // active log on every gated call (a multi-MB read at default maxLines).
+    if (!cachedLogger || cachedLogger.key !== key) {
+      cachedLogger = {
+        key,
+        logger: new DecisionLog({
+          dir: logDir(cwd),
+          maxLines: effective.log.maxLines,
+          keepFiles: effective.log.keepFiles,
+          retentionDays: effective.log.retentionDays,
+        }),
+      };
+    }
+    return cachedLogger.logger;
+  }
+
+  // ---- Deterministic secrets detection (ADR-0004) ----
+  // The machine-managed snapshot (auto-updated) and the operator's override
+  // file live in the gate dir — self-protection (ADR-0003) denies every
+  // agent tool call touching either.
+  const gateSecretsDir = join(home, ".pi/agent/gate");
+  const snapshotPath = join(gateSecretsDir, "gitleaks.toml");
+  const overridesPath = join(gateSecretsDir, "secrets.toml");
+  const bundledSnapshotPath = join(dirname(fileURLToPath(import.meta.url)), "../gitleaks.toml");
+
+  let snapshotRules: CompiledSecrets | undefined;
+  let userPart: { rules: CompiledSecrets["rules"]; overrides: SecretsOverride[] } = { rules: [], overrides: [] };
+  let overridesMtime: number | undefined;
+  let secretsSnapshotText: string | undefined;
+  let secretsLastUpdate = "not run yet";
+  let secretsNotice: string | undefined;
+  let secretsUpdating: Promise<UpdateResult> | undefined;
+
+  function mergedSecrets(): CompiledSecrets | undefined {
+    if (!snapshotRules) return undefined;
+    // The operator's rules ride ahead of the snapshot's: first hit wins.
+    return { ...snapshotRules, rules: [...userPart.rules, ...snapshotRules.rules], overrides: userPart.overrides };
+  }
+
+  /** Reload the operator's secrets.toml; absent or malformed clears it. */
+  async function loadUserPart(): Promise<void> {
+    try {
+      overridesMtime = (await stat(overridesPath)).mtimeMs;
+      userPart = compileUserSecrets(await readFile(overridesPath, "utf8"));
+    } catch {
+      overridesMtime = undefined;
+      userPart = { rules: [], overrides: [] };
+    }
+  }
+
+  /** The engine for this call, hot-reloading the override file on edit
+   *  or removal. */
+  async function currentSecrets(): Promise<CompiledSecrets | undefined> {
+    try {
+      if ((await stat(overridesPath)).mtimeMs !== overridesMtime) await loadUserPart();
+    } catch {
+      // absent now: clear any previously-loaded overrides
+      if (overridesMtime !== undefined) await loadUserPart();
+    }
+    return mergedSecrets();
+  }
+
+  interface UpdateResult {
+    kind: "updated" | "unchanged" | "failed";
+    message: string;
+  }
+
+  /** Serialized: one update at a time, from start-up or /gate:secrets update.
+   *  The config param carries the start-up-time user-level read (the
+   *  effective config may not be resolved yet). */
+  function runUpdate(config: GatekeeperConfig = effective): Promise<UpdateResult> {
+    secretsUpdating ??= doUpdate(config).finally(() => {
+      secretsUpdating = undefined;
     });
+    return secretsUpdating;
+  }
+
+  async function doUpdate(config: GatekeeperConfig): Promise<UpdateResult> {
+    const prevActive = snapshotRules?.rules.length;
+    try {
+      const response = await fetchFn(config.secrets.source, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      const candidate = compileSecrets(text); // throws on invalid TOML
+      // Sanity gate: an upstream reorg cannot silently empty the detector.
+      const floor = Math.max(100, (prevActive ?? candidate.rules.length) - 25);
+      if (candidate.rules.length < floor) {
+        throw new Error(`sanity gate: only ${candidate.rules.length} rules compile (floor ${floor})`);
+      }
+      if (text === secretsSnapshotText) {
+        secretsLastUpdate = `unchanged (${candidate.rules.length} rules active)`;
+        return { kind: "unchanged", message: secretsLastUpdate };
+      }
+      await mkdir(gateSecretsDir, { recursive: true });
+      await writeFile(snapshotPath, text, "utf8");
+      snapshotRules = candidate;
+      secretsSnapshotText = text;
+      await loadUserPart();
+      secretsLastUpdate = `updated: ${candidate.rules.length} rules active (was ${prevActive ?? candidate.rules.length})`;
+      return { kind: "updated", message: secretsLastUpdate };
+    } catch (error) {
+      secretsLastUpdate = `failed: ${(error as Error).message}; keeping the current rules`;
+      return { kind: "failed", message: secretsLastUpdate };
+    }
+  }
+
+  /** Load the engine (gate-dir snapshot, else the bundled fallback) and
+   *  run the background auto-update. Kicked off at load; the outcome is
+   *  reported at the first before_agent_start/tool_call — only on change
+   *  or failure (ADR-0004). */
+  async function initSecrets(): Promise<void> {
+    let text: string | undefined;
+    try {
+      text = await readFile(snapshotPath, "utf8");
+    } catch {
+      // no local snapshot yet: fall through to the bundled fallback
+    }
+    if (text === undefined) {
+      try {
+        text = await readFile(bundledSnapshotPath, "utf8");
+      } catch (error) {
+        secretsNotice = `gate › secrets: unavailable (no snapshot: ${(error as Error).message})`;
+        return;
+      }
+    }
+    try {
+      snapshotRules = compileSecrets(text);
+      secretsSnapshotText = text;
+      await loadUserPart();
+    } catch (error) {
+      secretsNotice = `gate › secrets: unavailable (${(error as Error).message}); detection is off`;
+      return;
+    }
+    // Read the user-level config early so secrets.enabled/autoUpdate/source
+    // are honored on the very first start. Scoped to the auto-update decision
+    // only: reassigning `effective` here could clobber a concurrent
+    // user+project refresh (which re-reads only on mtime change, so the
+    // clobber would stick for the session).
+    const early = resolveConfig(await readScoped(false, ""));
+    if (early.secrets.enabled && early.secrets.autoUpdate) {
+      const result = await runUpdate(early);
+      if (result.kind !== "unchanged") secretsNotice = `gate › secrets: ${result.message}`;
+    }
+  }
+
+  function flushSecretsNotice(ctx: AnyCtx | undefined): void {
+    if (!secretsNotice) return;
+    ctx?.ui.notify(secretsNotice, secretsNotice.includes("failed") || secretsNotice.includes("unavailable") ? "warning" : "info");
+    secretsNotice = undefined;
   }
 
   async function askOperator(
     prompt: OperatorPromptInfo,
-  ): Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui"> {
+  ): Promise<"allow" | "deny" | "no-ui"> {
     const ctx = currentCtx;
     if (!ctx || !ctx.hasUI) return "no-ui";
     stats.asked++;
@@ -163,16 +318,8 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       `Reason: ${prompt.reason}\n` +
       `Arguments: ${prompt.argsSummary}`;
     ctx.ui.notify(`gate › ${prompt.tool}\n${detail}`, "warning");
-    const choice = await ctx.ui.select(`gate › ${prompt.tool}`, [
-      "Allow once",
-      "Allow for session",
-      "Allow always",
-      "Deny",
-    ]);
-    if (choice === "Allow once") return "allow-once";
-    if (choice === "Allow for session") return "allow-session";
-    if (choice === "Allow always") return "allow-always";
-    return "deny";
+    const choice = await ctx.ui.select(`gate › ${prompt.tool}`, ["Allow", "Deny"]);
+    return choice === "Allow" ? "allow" : "deny";
   }
 
   /** Tokenize a slash-command argument string, quotes respected: a quoted
@@ -239,7 +386,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       );
       return;
     }
-    const scoped = await readScoped(true, cwd);
+    const scoped = await readScoped(trusted, cwd);
     const target = scoped[level] ?? {};
     mutate(target);
     scoped[level] = target;
@@ -250,10 +397,29 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     effective = resolveConfig(await readScoped(currentCtx?.isProjectTrusted() ?? false, cwd));
   }
 
+  // Load the secrets engine and run the background auto-update (ADR-0004).
+  // The tool_call handler awaits this promise, so no gated call races the
+  // load; after startup it is settled and free. Also returned so tests can
+  // await readiness.
+  const initDone = initSecrets().catch(() => {
+    // initSecrets reports its own failures via secretsNotice
+  });
+
   const deps: GateDeps = {
     home,
     getConfig: () => effective,
-    classify: (input) => createSystemOneClassifier(effective.endpoint, fetchFn).classify(input),
+    classify: (input) =>
+      createSystemOneClassifier(effective.endpoint, fetchFn, {
+        // Debug (notify: "debug"): the exact request body posted and the
+        // answer the gate acted on, one dump per classification.
+        onExchange: (request, answer) => {
+          if (effective.notify !== "debug") return;
+          currentCtx?.ui.notify(
+            `gate › debug — model request: ${JSON.stringify(request)}\ngate › debug — model answer: ${JSON.stringify(answer)}`,
+            "info",
+          );
+        },
+      }).classify(input),
     askOperator,
     notify: (line) => {
       currentCtx?.ui.notify(line, line.includes("blocked") ? "warning" : "info");
@@ -266,26 +432,32 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           // logging must never break the gate
         });
     },
-    addGrant: async (rule: Rule): Promise<void> => {
-      const cwd = currentCtx?.cwd ?? process.cwd();
-      // The gate decides whether the write is allowed; the caller (decision
-      // layer) handles failures so the operator sees them.
-      await writeScoped("user", (scoped) => {
-        scoped.rules = [...(scoped.rules ?? []), rule];
-      }, cwd, undefined);
+    // Secrets detection (ADR-0004): deterministic, before every rule and
+    // the model; only the operator's override file suppresses a hit.
+    scanSecrets: async (tool, args): Promise<SecretsHit | undefined> => {
+      if (!effective.secrets.enabled) return undefined;
+      const engine = await currentSecrets();
+      if (!engine) return undefined;
+      const targetPath = typeof args?.path === "string" ? args.path : undefined;
+      return scanSecrets(engine, argsText(tool, args), targetPath);
     },
   };
 
   const gate = createGate(deps);
 
-  pi.on("before_agent_start", (event: { prompt?: string }) => {
+  pi.on("before_agent_start", (event: { prompt?: string }, ctx?: ExtensionContext) => {
     currentTask = event.prompt ?? "";
+    flushSecretsNotice((ctx as AnyCtx | undefined) ?? currentCtx);
   });
 
   pi.on("tool_call", async (event: { toolName?: unknown; input?: unknown }, ctx: ExtensionContext) => {
     const toolName = event.toolName;
     if (typeof toolName !== "string") return;
     currentCtx = ctx as AnyCtx;
+    // Await the secrets load: a call in the load window blocks after the
+    // engine is ready, never falls through without detection (ADR-0004).
+    await initDone;
+    flushSecretsNotice(currentCtx);
     await refreshConfig(currentCtx);
     const decision = await gate.decide({
       tool: toolName,
@@ -302,17 +474,17 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
   });
 
   pi.registerCommand("gate", {
-    description: "Gatekeeper status: posture, endpoint, session stats",
+    description: "Gatekeeper status: posture, endpoint, secrets, session stats",
     handler: async (_args: string, ctx: AnyCtx) => {
       await refreshConfig(ctx);
-      const floors = Object.entries(effective.floors)
-        .filter(([, floored]) => floored)
-        .map(([tool]) => tool)
-        .join(", ");
+      const secretsLine = snapshotRules
+        ? `${snapshotRules.rules.length}/${snapshotRules.total} gitleaks rules active (${snapshotRules.skipped} skipped) + ${userPart.rules.length} user, last update: ${secretsLastUpdate}`
+        : "unavailable";
       const lines = [
         `Gatekeeper ${effective.enabled ? "enabled" : "disabled"}`,
         `Endpoint: ${effective.endpoint.model} @ ${effective.endpoint.url}`,
-        `Threshold: ${effective.threshold} | Floors: ${floors || "none"} | Fail mode: ${effective.failMode}`,
+        `Threshold: ${effective.threshold} | Fail mode: ${effective.failMode}`,
+        `Secrets: ${effective.secrets.enabled ? secretsLine : "off"}`,
         `Rules: ${effective.rules.length} (incl. shipped defaults) | Log: ${logDir(ctx.cwd)}`,
         `Session: ${stats.allowed} allowed, ${stats.blocked} blocked, ${stats.asked} asked`,
       ];
@@ -359,7 +531,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
         const ref = clean[1];
         const rmLevel = ref.startsWith("p") ? "project" : "user";
         const index = (Number(ref.match(/\d+$/)?.[0] ?? 0) || 0) - 1;
-        const scoped = await readScoped(true, ctx.cwd);
+        const scoped = await readScoped(ctx.isProjectTrusted(), ctx.cwd);
         const removed = scoped[rmLevel]?.rules?.[index];
         if (!removed) {
           ctx.ui.notify(`gate › no rule ${ref} at ${rmLevel} level`, "warning");
@@ -397,7 +569,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       }
 
       // default: list
-      const scoped = await readScoped(true, ctx.cwd);
+      const scoped = await readScoped(ctx.isProjectTrusted(), ctx.cwd);
       const listing = (["project", "user"] as const).flatMap((level) =>
         (scoped[level]?.rules ?? []).map(
           (rule, i) => `${level[0]}${i + 1}. ${rule.action} ${rule.pattern ?? ""} ${rule.tools?.join(",") ?? ""}`.trim(),
@@ -427,9 +599,9 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           ctx.ui.notify(`gate › rules cannot be set here — use gate:rules add/rm`, "warning");
           return;
         }
-        const validator = key.startsWith("floors.") ? isBoolean : CONFIG_KEYS[key];
+        const validator = CONFIG_KEYS[key];
         if (!validator) {
-          ctx.ui.notify(`gate › unknown key "${key}" — valid keys: ${[...Object.keys(CONFIG_KEYS), "floors.<tool>"].join(", ")}`, "warning");
+          ctx.ui.notify(`gate › unknown key "${key}" — valid keys: ${Object.keys(CONFIG_KEYS).join(", ")}`, "warning");
           return;
         }
         const parse = (): unknown => {
@@ -461,11 +633,11 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
               ...(scoped.endpoint ?? {}),
               [key.slice("endpoint.".length)]: parsed,
             };
-          } else if (key.startsWith("floors.")) {
-            scoped.floors = {
-              ...DEFAULT_CONFIG.floors,
-              ...(scoped.floors ?? {}),
-              [key.slice("floors.".length)]: parsed as boolean,
+          } else if (key.startsWith("secrets.")) {
+            scoped.secrets = {
+              ...DEFAULT_CONFIG.secrets,
+              ...(scoped.secrets ?? {}),
+              [key.slice("secrets.".length)]: parsed,
             };
           } else if (key === "stateBudgetChars") {
             scoped.stateBudgetChars = parsed as number;
@@ -486,9 +658,10 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           `enabled: ${effective.enabled}`,
           `threshold: ${effective.threshold}`,
           `endpoint: ${effective.endpoint.url} (${effective.endpoint.model})`,
-          `failMode: ${effective.failMode} | cache: ${effective.cache}`,
+          `failMode: ${effective.failMode} | notify: ${effective.notify}`,
+          `secrets: ${effective.secrets.enabled ? "enabled" : "off"} | autoUpdate: ${effective.secrets.autoUpdate}`,
           `log: level=${effective.log.level} maxLines=${effective.log.maxLines} keepFiles=${effective.log.keepFiles} retentionDays=${effective.log.retentionDays}`,
-          `floors: ${JSON.stringify(effective.floors)}`,
+          `secrets source: ${effective.secrets.source}`,
         ].join("\n"),
         "info",
       );
@@ -511,6 +684,54 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       ctx.ui.notify([`gate › last ${selected.length} decisions:`, ...body].join("\n"), "info");
     },
   });
+
+  pi.registerCommand("gate:secrets", {
+    description: 'Secrets engine: status (default), update, test "<text>"',
+    handler: async (args: string, ctx: AnyCtx) => {
+      await initDone;
+      await refreshConfig(ctx);
+      const { parts } = parseCmdArgs(args);
+
+      if (parts[0] === "update") {
+        const result = await runUpdate();
+        ctx.ui.notify(`gate › secrets: ${result.message}`, result.kind === "failed" ? "warning" : "info");
+        return;
+      }
+
+      if (parts[0] === "test" && parts[1] !== undefined) {
+        const engine = await currentSecrets();
+        if (!engine) {
+          ctx.ui.notify("gate › secrets: engine unavailable", "warning");
+          return;
+        }
+        const hit = scanSecrets(engine, parts[1]);
+        ctx.ui.notify(
+          hit
+            ? `gate › secrets: hit — ${hit.ruleId}: ${hit.masked}`
+            : "gate › secrets: no rule matches the text",
+          hit ? "warning" : "info",
+        );
+        return;
+      }
+
+      const engine = await currentSecrets();
+      const snapshotLine = snapshotRules
+        ? `${snapshotRules.rules.length}/${snapshotRules.total} gitleaks rules active (${snapshotRules.skipped} skipped) + ${userPart.rules.length} user rules`
+        : "unavailable";
+      ctx.ui.notify(
+        [
+          `gate › secrets: ${effective.secrets.enabled ? engine ? snapshotLine : "engine unavailable" : "off"}`,
+          `source: ${effective.secrets.source} (autoUpdate: ${effective.secrets.autoUpdate ? "on" : "off"})`,
+          `last update: ${secretsLastUpdate}`,
+          `snapshot: ${snapshotPath} (auto-updated — do not edit; pin via secrets.source)`,
+          `overrides: ${overridesPath} (yours — [[rules]] and [[allow]], never touched by the updater)`,
+        ].join("\n"),
+        "info",
+      );
+    },
+  });
+
+  return initDone;
 }
 
 export default function gatekeeper(pi: ExtensionAPI): void {

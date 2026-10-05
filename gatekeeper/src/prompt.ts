@@ -1,12 +1,12 @@
 /**
  * The gate's operator prompt: a rounded-border box with the classification
  * line colored green (safe), red (unsafe), or yellow (unsure or unavailable).
- * Keys: y = allow once, s = allow for session, a = allow always, n/esc = deny.
+ * Keys: y = allow, n/esc = deny. Nothing persists from a prompt (ADR-0005).
  */
 
 import type { Component } from "@earendil-works/pi-tui";
 
-export type GatePromptResult = "allow-once" | "allow-session" | "allow-always" | "deny";
+export type GatePromptResult = "allow" | "deny";
 export type GateClassification = "safe" | "unsafe" | "unsure";
 
 export interface GatePromptInfo {
@@ -80,9 +80,7 @@ export function createGatePrompt(info: GatePromptInfo) {
     return {
       invalidate: () => {},
       handleInput: (data: string) => {
-        if (data === "y") settle("allow-once");
-        else if (data === "s") settle("allow-session");
-        else if (data === "a") settle("allow-always");
+        if (data === "y") settle("allow");
         else if (data === "n" || data === "\x1b") settle("deny");
       },
       render: (width: number): string[] => {
@@ -90,8 +88,8 @@ export function createGatePrompt(info: GatePromptInfo) {
         const title = ` gate › ${info.tool} `;
         const top =
           inner >= visible(title) + 2
-            ? `╭─${title}${"─".repeat(inner - visible(title) - 1)}╮`
-            : `╭─${title.slice(0, Math.max(1, inner - 3))}─╮`;
+            ? `╭─${title}${"─".repeat(inner - visible(title) + 1)}╮`
+            : `╭─${title.slice(0, inner)}─╮`;
 
         const plain: string[] = [];
         const classificationPlain = `Classification: ${value}`;
@@ -99,7 +97,7 @@ export function createGatePrompt(info: GatePromptInfo) {
         plain.push(`Reason: ${info.reason}`);
         for (const line of wrap(info.argsSummary, inner - 2)) plain.push(line);
         plain.push("");
-        plain.push("y: allow once · s: allow for session · a: allow always · n/esc: deny");
+        plain.push("y: allow · n/esc: deny");
 
         const lines: string[] = [top];
         for (const text of plain) {
@@ -109,7 +107,7 @@ export function createGatePrompt(info: GatePromptInfo) {
             lines.push(
               `│ ${padded.replace(value, theme.fg(color, theme.bold(value)))} │`,
             );
-          } else if (text.startsWith("y: allow once")) {
+          } else if (text.startsWith("y: allow")) {
             lines.push(`│ ${theme.fg("dim", padded)} │`);
           } else if (text.startsWith("Reason:") || info.argsSummary.includes(text) || text === "") {
             lines.push(`│ ${padded} │`);

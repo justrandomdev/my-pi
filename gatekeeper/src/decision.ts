@@ -1,13 +1,15 @@
 /**
- * The gate: rules first, then the session cache, then the model gate
- * (matrix + ask floors), then the operator. See docs/spec.md.
+ * The gate: self-protection, deterministic secrets detection, rules, then
+ * the model gate (the primary classifier, ADR-0005), then the operator.
+ * See docs/spec.md.
  */
 
 import type { ClassifyInput, Classification, ClassificationResult } from "./classifier.js";
 import type { GatekeeperConfig } from "./config.js";
-import { gateDirs, grantPattern, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
+import { gateDirs, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
+import type { SecretsHit } from "./secrets.js";
 
-export type DecisionSource = "disabled" | "protected" | "rule" | "model" | "operator" | "cache" | "fail";
+export type DecisionSource = "disabled" | "protected" | "secrets" | "rule" | "model" | "operator" | "fail";
 
 export interface Decision {
   action: "allow" | "block";
@@ -51,51 +53,36 @@ export interface GateDeps {
   home: string;
   getConfig(): GatekeeperConfig;
   classify(input: ClassifyInput): Promise<ClassificationResult>;
-  askOperator(prompt: OperatorPromptInfo): Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui">;
+  askOperator(prompt: OperatorPromptInfo): Promise<"allow" | "deny" | "no-ui">;
   notify(line: string): void;
   writeLog(record: LogRecord): void;
-  addGrant(rule: Rule): Promise<void>;
+  scanSecrets(tool: string, args: Record<string, unknown>): Promise<SecretsHit | undefined>;
 }
 
 export interface Gate {
   decide(input: DecideInput): Promise<Decision>;
 }
 
+/** The model never sees more than this many argument characters
+ *  (ADR-0002/0005). A fixed constant, not a knob — knobs invite tuning a
+ *  safety property. */
+const MODEL_ARGS_CHARS = 100;
+
 function cap(text: string, budget: number): string {
   return text.length <= budget ? text : `${text.slice(0, budget)}…`;
 }
 
-/** Argument keys that carry file contents: write's `content`, edit's
- *  `edits[].oldText`/`newText`. They are redacted from the state the model
- *  sees and from the decision log (ADR-0002: the judge is not steered by
- *  contents; the log never records them). The operator prompt keeps its
- *  capped preview — the operator is human. */
-const CONTENT_KEYS = new Set(["content", "oldText", "newText"]);
-
-function redactContent(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactContent);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value)) {
-      out[key] = typeof v === "string" && CONTENT_KEYS.has(key) ? `<${v.length} chars omitted>` : redactContent(v);
-    }
-    return out;
-  }
-  return value;
-}
-
 export function createGate(deps: GateDeps): Gate {
-  const sessionCache = new Map<string, Decision>();
-
   return {
     async decide({ tool, args, task, cwd }: DecideInput): Promise<Decision> {
       const config = deps.getConfig();
 
-      const argsSummary = cap(JSON.stringify(args ?? {}), config.log.truncateArgsBytes);
-      const logArgs = cap(JSON.stringify(redactContent(args ?? {})), config.log.truncateArgsBytes);
-
-      // Self-protection (ADR-0003): before every rule, overridable by none.
-      const cacheKey = config.cache ? `${tool}||${JSON.stringify(args)}||${task}` : "";
+      const raw = JSON.stringify(args ?? {});
+      // The operator prompt keeps a capped preview — the operator is human.
+      // The model and the log see only the first 100 characters.
+      const argsSummary = cap(raw, config.log.truncateArgsBytes);
+      const modelArgs = raw.slice(0, MODEL_ARGS_CHARS);
+      const logArgs = raw.length > MODEL_ARGS_CHARS ? `${modelArgs}… (${raw.length} chars)` : modelArgs;
 
       const finish = (decision: Decision): Decision => {
         const label =
@@ -103,7 +90,9 @@ export function createGate(deps: GateDeps): Gate {
             ? `${decision.classification}${decision.confidence !== undefined ? ` (${decision.confidence.toFixed(2)})` : ""}`
             : decision.source;
         // The notify knob: `off` skips every notification; `summary` keeps
-        // blocks/asks and skips allows; `always` notifies every decision.
+        // blocks/asks and skips allows; `always` notifies every decision
+        // (`debug` behaves like `always` here — the request/answer dump is
+        // wired at the classifier).
         const skipNotify =
           config.notify === "off" || (config.notify === "summary" && decision.action === "allow");
         if (!skipNotify) {
@@ -122,14 +111,15 @@ export function createGate(deps: GateDeps): Gate {
         return decision;
       };
 
-      // Self-protection (ADR-0003): before the enabled check and every rule,
-      // overridable by none — it holds even while the gate is disabled.
-      if (touchesGatePaths(tool, args, deps.home, cwd)) {
+      // Self-protection (ADR-0003): before the enabled check and every
+      // layer, overridable by none — it holds even while the gate is
+      // disabled, so a disabled gate cannot be used as a door.
+      if (await touchesGatePaths(tool, args, deps.home, cwd)) {
         return finish({
           action: "block",
           source: "protected",
           reason:
-            "the gate protects its own configuration and log; agent tool calls touching them are always denied. The operator configures the gate with /gate commands or a manual edit.",
+            "the gate protects its own configuration, log, and secrets definitions; agent tool calls touching them are always denied. The operator configures the gate with /gate commands or a manual edit.",
         });
       }
 
@@ -137,11 +127,24 @@ export function createGate(deps: GateDeps): Gate {
         return finish({
           action: "allow",
           source: "disabled",
-          reason: "gate is disabled; pass-through without classification or operator review",
+          reason: "gate is disabled; pass-through without detection, classification, or operator review",
         });
       }
 
-      // Layer 1: static rules. First hit wins; no model call.
+      // Secrets detection (ADR-0004): deterministic, before every rule and
+      // the model. A hit blocks; only the operator's override file
+      // (secrets.toml) suppresses it — no rule, no model, no prompt.
+      const hit = await deps.scanSecrets(tool, args);
+      if (hit) {
+        return finish({
+          action: "block",
+          source: "secrets",
+          reason: `possible secret (${hit.ruleId}): ${hit.masked}; blocked before every rule and the model. False positive? Suppress it in ~/.pi/agent/gate/secrets.toml ([[allow]]) — see /gate:secrets.`,
+        });
+      }
+
+      // Rules: a first-match fast-path for the obvious and the operator's
+      // explicit intent (ADR-0005).
       const rule = matchRules(config.rules, tool, args, deps.home, cwd);
       if (rule) {
         return finish({
@@ -151,31 +154,18 @@ export function createGate(deps: GateDeps): Gate {
         });
       }
 
-      // Layer 2: session cache. Identical call in the same task reuses the decision.
-      if (config.cache && sessionCache.has(cacheKey)) {
-        return finish({ ...sessionCache.get(cacheKey)!, source: "cache" });
-      }
-
-      // Model/fail decisions and operator denies or session allows are
-      // cacheable; rule hits are not (they never re-classify), and neither
-      // are operator allow-once/allow-always — "once" means once, and the
-      // grant rule answers allow-always repetition.
-      // `finish` notifies + logs; `settle` adds the cache layer on top.
-      const settle = (decision: Decision): Decision => {
-        if (config.cache) sessionCache.set(cacheKey, decision);
-        return finish(decision);
-      };
-
-      // Layer 3: the model gate.
+      // The model gate: the primary classifier (ADR-0005).
       let classification: ClassificationResult | undefined;
       let failure: string | undefined;
       try {
         classification = await deps.classify({
           tool,
-          args: cap(JSON.stringify(redactContent(args ?? {})), config.stateBudgetChars),
+          args: modelArgs,
           task: cap(task, config.stateBudgetChars),
-          // The gate's own dirs ride along as a backstop for obfuscated
-          // spellings that slip past the static self-protection check.
+          // The working directory rides along so "writes outside the project"
+          // in the policy is decidable; the gate's own dirs ride along as a
+          // backstop for obfuscated spellings that slip past the layers above.
+          cwd,
           protectedPaths: [...gateDirs(deps.home, cwd), ...protectedPatterns(config.rules)],
           policy: config.policy,
         });
@@ -183,31 +173,28 @@ export function createGate(deps: GateDeps): Gate {
         failure = `model unavailable: ${(error as Error).message}`;
       }
 
-      const askFloor = config.floors[tool] === true;
-
       if (!failure) {
         const c = classification!;
         const confidentSafe = c.choice === "safe" && c.confidence >= config.threshold;
         const confidentUnsafe = c.choice === "unsafe" && c.confidence >= config.threshold;
 
         if (confidentUnsafe) {
-          return settle({ action: "block", source: "model", reason: `classified unsafe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
+          return finish({ action: "block", source: "model", reason: `classified unsafe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
         }
-        if (!askFloor && confidentSafe) {
-          return settle({ action: "allow", source: "model", reason: `classified safe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
+        if (confidentSafe) {
+          return finish({ action: "allow", source: "model", reason: `classified safe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
         }
       } else if (config.failMode === "block") {
-        return settle({ action: "block", source: "fail", reason: failure });
+        return finish({ action: "block", source: "fail", reason: failure });
       }
 
-      // Everything else routes to the operator.
+      // Everything the model cannot settle goes to the operator: allow or
+      // deny, nothing persisted (ADR-0005).
       const reason =
         failure ??
-        (askFloor
-          ? `ask floor: ${tool} calls always require operator review (classification ${classification!.choice}, ${classification!.confidence.toFixed(2)})`
-          : classification!.choice === "unsure"
-            ? `model unsure (${classification!.confidence.toFixed(2)})`
-            : `confidence ${classification!.confidence.toFixed(2)} below threshold ${config.threshold}`);
+        (classification!.choice === "unsure"
+          ? `model unsure (${classification!.confidence.toFixed(2)})`
+          : `confidence ${classification!.confidence.toFixed(2)} below threshold ${config.threshold}`);
 
       const outcome = await deps.askOperator({
         tool,
@@ -220,41 +207,12 @@ export function createGate(deps: GateDeps): Gate {
 
       const cause: DecisionSource = failure ? "fail" : "operator";
       if (outcome === "no-ui") {
-        return settle({ action: "block", source: cause, reason: `${reason}; no UI available to confirm` });
+        return finish({ action: "block", source: cause, reason: `${reason}; no UI available to confirm` });
       }
       if (outcome === "deny") {
-        return settle({ action: "block", source: cause, reason: `${reason}; operator denied` });
+        return finish({ action: "block", source: cause, reason: `${reason}; operator denied` });
       }
-
-      if (outcome === "allow-always") {
-        const pattern = grantPattern(tool, args, deps.home, cwd);
-        if (pattern) {
-          try {
-            await deps.addGrant({ action: "allow", tools: [tool], pattern });
-          } catch (error) {
-            // Allow the call and tell the operator; the gate must not silently swallow the failure.
-            const message = `grant rule failed to persist: ${(error as Error).message}`;
-            deps.notify(`gate › ${tool}: ${message}`);
-            // Not cached: the grant failed to persist, so the next identical
-            // call must ask again, as the reason promises.
-            return finish({
-              action: "allow",
-              source: cause,
-              reason: `${reason}; ${message}; you will be asked again next time`,
-            });
-          }
-          // Not cached: the grant rule answers repetition at the rule layer.
-          return finish({ action: "allow", source: cause, reason: `${reason}; operator granted always: ${pattern}` });
-        }
-        return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed once (no grant pattern derivable)` });
-      }
-
-      if (outcome === "allow-session") {
-        return settle({ action: "allow", source: cause, reason: `${reason}; operator allowed for the session` });
-      }
-
-      // Allow once: never cached — an identical re-issued call asks again.
-      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed once` });
+      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed` });
     },
   };
 }

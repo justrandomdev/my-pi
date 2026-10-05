@@ -70,23 +70,29 @@ describe("gate prompt component", () => {
     const component = factory({} as any, theme, {} as any, (r) => outcomes.push(r));
     component.handleInput?.("x");
     component.handleInput?.("\x1b[A"); // arrow key
+    component.handleInput?.("s"); // no longer an option
+    component.handleInput?.("a"); // no longer an option
     expect(outcomes).toEqual([]);
     component.handleInput?.("y");
-    component.handleInput?.("a"); // settled already
-    expect(outcomes).toEqual(["allow-once"]);
+    component.handleInput?.("n"); // settled already
+    expect(outcomes).toEqual(["allow"]);
   });
 
-  it("esc denies and n denies, a allows always", () => {
+  it("esc denies and n denies", () => {
     for (const [key, expected] of [
       ["\x1b", "deny"],
       ["n", "deny"],
-      ["s", "allow-session"],
-      ["a", "allow-always"],
     ] as const) {
       const outcomes: string[] = [];
       const factory = createGatePrompt(info);
       factory({} as any, theme, {} as any, (r) => outcomes.push(r)).handleInput?.(key);
       expect(outcomes).toEqual([expected]);
     }
+  });
+
+  it("all border rows are the same visible width", () => {
+    const lines = render(info, 80).map((l) => l.replace(/<[^>]+>/g, ""));
+    const widths = new Set(lines.map((l) => l.length));
+    expect(widths.size).toBe(1);
   });
 });

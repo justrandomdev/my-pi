@@ -21,7 +21,17 @@ export interface LogConfig {
   maxLines: number;
   keepFiles: number;
   retentionDays: number;
+  /** Character cap on the argument preview — a JS string budget; the
+   *  name says bytes and is kept for config compatibility. */
   truncateArgsBytes: number;
+}
+
+export interface SecretsConfig {
+  enabled: boolean;
+  /** Fetch the source on start and adopt it when it passes the sanity gates. */
+  autoUpdate: boolean;
+  /** gitleaks.toml source URL (ADR-0004). Pin a tag by changing it. */
+  source: string;
 }
 
 export interface GatekeeperConfig {
@@ -31,28 +41,28 @@ export interface GatekeeperConfig {
   endpoint: EndpointConfig;
   /** What counts as unsafe; sent to the model as classification instructions. */
   policy: string;
-  /** Tools with an ask floor: the model can never auto-allow them. */
-  floors: Record<string, boolean>;
   /** Behavior when the model fails or times out. */
   failMode: "ask" | "block";
-  /** Session decision cache. */
-  cache: boolean;
-  /** Character budget for the state sent to the model. */
+  /** Character budget for the task text sent to the model; arguments are
+   *  capped to a fixed 100 characters (ADR-0002/0005). */
   stateBudgetChars: number;
   /** Transparency-line verbosity: `always` notifies every decision (default);
-   *  `summary` notifies only blocks/asks; `off` suppresses all notifications.
-   *  The decision log is unaffected. */
-  notify: "always" | "summary" | "off";
+   *  `summary` notifies only blocks/asks; `off` suppresses all notifications;
+   *  `debug` is `always` plus the full model request and answer dumped per
+   *  classification. The decision log is unaffected. */
+  notify: "always" | "summary" | "off" | "debug";
   log: LogConfig;
+  /** Deterministic secrets detection (ADR-0004). */
+  secrets: SecretsConfig;
   /** Ordered; project rules come first (ADR-0001). */
   rules: Rule[];
 }
 
 export const DEFAULT_POLICY = [
-  "Classify whether the tool call is safe for the operator's machine and data.",
-  "unsafe: destructive or irreversible operations, exposing or exfiltrating secrets or protected paths, writes outside the project, obfuscated or deceptive intent.",
-  "safe: read-only inspection of unprotected paths that clearly serves the current task.",
-  "unsure: anything ambiguous, indirect, or serving an unclear purpose.",
+  "Evaluate whether the tool call is safe to execute on the operator's machine.",
+  "Treat standard development actions (inspecting files, running tests, local builds, text filtering) as safe.",
+  "Command complexity, chained pipes (|), and subshells do not inherently make a command unsafe or unsure—evaluate the net execution side-effects.",
+  "Prioritize protecting sensitive credentials (.env, API keys, cloud tokens, SSH keys) and preventing unauthorized system state changes or remote data egress."
 ].join(" ");
 
 export const DEFAULT_CONFIG: GatekeeperConfig = {
@@ -67,9 +77,7 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
     keepAlive: "10m",
   },
   policy: DEFAULT_POLICY,
-  floors: { bash: true, powershell: true, edit: true, write: true },
   failMode: "ask",
-  cache: true,
   stateBudgetChars: 4000,
   notify: "always",
   log: {
@@ -78,6 +86,11 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
     keepFiles: 10,
     retentionDays: 30,
     truncateArgsBytes: 2048,
+  },
+  secrets: {
+    enabled: true,
+    autoUpdate: true,
+    source: "https://raw.githubusercontent.com/gitleaks/gitleaks/refs/heads/master/config/gitleaks.toml",
   },
   rules: [{ action: "allow", tools: ["ls", "find"] }],
 };

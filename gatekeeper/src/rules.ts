@@ -3,6 +3,7 @@
  * skips the decision model entirely. See docs/spec.md and GLOSSARY.md.
  */
 
+import { realpath } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
 
 export interface Rule {
@@ -154,7 +155,9 @@ function matchesShell(rule: Rule, command: string, home: string): boolean {
   return components.some((c) => matchesContent(rule.pattern as string, c, home, "deny"));
 }
 
-function argsText(tool: string, args: Record<string, unknown>): string {
+/** The text a rule (and the secrets engine) matches over: the shell
+ *  command for shell tools, the serialized arguments otherwise. */
+export function argsText(tool: string, args: Record<string, unknown>): string {
   if (SHELL_TOOLS.has(tool)) {
     const command = args?.command;
     if (typeof command === "string") return command;
@@ -213,11 +216,19 @@ export function gateDirs(home: string, cwd?: string): string[] {
   return dirs.map((d) => normalize(d));
 }
 
-/** Self-protection: does this call touch the gate's own configuration or
- *  log? Checked before every rule, and overridable by none of them —
- *  an agent cannot neuter the gate through the gate. */
-export function touchesGatePaths(tool: string, args: Record<string, unknown>, home: string, cwd?: string): boolean {
-  const dirs = gateDirs(home, cwd);
+/** Self-protection: does this call touch the gate's own configuration,
+ *  log, or secrets definitions? Checked before every rule, and
+ *  overridable by none of them — an agent cannot neuter the gate through
+ *  the gate. Every compared path is realpath'd best-effort, so a symlink
+ *  chain into the gate dir is caught; realpath of a not-yet-existing
+ *  target (a write creating a file) falls back to the lexical path. */
+export async function touchesGatePaths(
+  tool: string,
+  args: Record<string, unknown>,
+  home: string,
+  cwd?: string,
+): Promise<boolean> {
+  const dirs = await Promise.all(gateDirs(home, cwd).map(real));
   if (FILE_TOOLS.has(tool)) {
     const raw = typeof args?.path === "string" ? expandHome(args.path, home) : undefined;
     if (raw === undefined) return false;
@@ -226,7 +237,8 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
     // absolute gate dirs; a relative spelling that cannot resolve to one
     // (no cwd, or a dot-detour) still hits the literal gate-dir prefixes.
     const resolved = isAbsolute(target) ? target : cwd ? normalize(join(cwd, target)) : target;
-    if (dirs.some((d) => resolved === d || resolved.startsWith(`${d}/`))) return true;
+    const realTarget = await real(resolved);
+    if (dirs.some((d) => realTarget === d || realTarget.startsWith(`${d}/`))) return true;
     return [".pi/gate", ".pi/agent/gate"].some((p) => target === p || target.startsWith(`${p}/`));
   }
   const raw = expandHome(argsText(tool, args), home)
@@ -240,6 +252,18 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
     .join("");
   const needles = [...dirs.flatMap((d) => [`${d}/`, `${d} `]), ".pi/gate/", ".pi/agent/gate/"];
   if (needles.some((n) => raw.includes(n) || normalized.includes(n))) return true;
+  // Symlink chains: realpath each path-shaped token (relative ones
+  // resolve against the cwd) and flag any that lands inside a gate dir.
+  const tokenTargets = raw
+    .split(/\s+/)
+    .map((t) => t.replace(/^["'([{]+|["',;|&)]+$/g, ""))
+    .filter((t) => t.includes("/"))
+    .map((t) => {
+      const n = normalize(t);
+      return isAbsolute(n) ? n : cwd ? join(cwd, n) : n;
+    });
+  const reals = await Promise.all(tokenTargets.map(real));
+  if (reals.some((r) => dirs.some((d) => r === d || r.startsWith(`${d}/`)))) return true;
   // `cd` chains: track the virtual cwd across components and flag any cd
   // that lands inside a gate directory. Each relative cd resolves against
   // the previous cd's target, not the original cwd. Variables and dynamic
@@ -265,17 +289,12 @@ export function touchesGatePaths(tool: string, args: Record<string, unknown>, ho
   return false;
 }
 
-/** The pattern an "allow always" grant should pin: the file tool's
- *  cwd-absolute target (grants live in the user-level config — a relative
- *  pattern would allow that path in every project), or the shell/other
- *  tool's argument text. */
-export function grantPattern(tool: string, args: Record<string, unknown>, home: string, cwd?: string): string | undefined {
-  if (FILE_TOOLS.has(tool)) {
-    if (typeof args?.path !== "string") return undefined;
-    const target = normalize(expandHome(args.path, home));
-    if (isAbsolute(target)) return target;
-    return cwd ? normalize(join(cwd, target)) : undefined;
+/** Best-effort realpath: resolves symlinks where the path exists, and
+ *  returns the lexical path where it does not (a write creates files). */
+async function real(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    return target;
   }
-  const text = argsText(tool, args);
-  return text && text !== "{}" ? text : undefined;
 }

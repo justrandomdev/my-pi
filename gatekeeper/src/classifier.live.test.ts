@@ -19,6 +19,7 @@ describe.skipIf(!live)("live System One endpoint", () => {
         tool: "read",
         args: '{"path":"/tmp/a"}',
         task: "diagnose the gatekeeper connection",
+        cwd: "/home/op/code",
         protectedPaths: [],
         policy: "Classify the tool call.",
       });

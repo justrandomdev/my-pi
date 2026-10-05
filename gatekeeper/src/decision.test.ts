@@ -1,39 +1,43 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createGate, type Decision, type GateDeps } from "./decision.js";
 import { DEFAULT_CONFIG, type GatekeeperConfig } from "./config.js";
 import type { ClassificationResult } from "./classifier.js";
-import type { Rule } from "./rules.js";
+import type { SecretsHit } from "./secrets.js";
 
 const HOME = "/home/op";
 
 function makeDeps(overrides: {
   config?: Partial<GatekeeperConfig>;
   classify?: (input: any) => Promise<ClassificationResult>;
-  askOperator?: (prompt: any) => Promise<"allow-once" | "allow-session" | "allow-always" | "deny" | "no-ui">;
-  addGrant?: (rule: Rule) => Promise<void>;
-} = {}): { deps: GateDeps; log: any[]; notified: string[]; grants: Rule[]; classifyCalls: any[] } {
+  askOperator?: (prompt: any) => Promise<"allow" | "deny" | "no-ui">;
+  scanSecrets?: (tool: string, args: any) => Promise<SecretsHit | undefined>;
+} = {}): { deps: GateDeps; log: any[]; notified: string[]; classifyCalls: any[]; asked: any[] } {
   const log: any[] = [];
   const notified: string[] = [];
-  const grants: Rule[] = [];
   const classifyCalls: any[] = [];
+  const asked: any[] = [];
   const deps: GateDeps = {
     home: HOME,
     getConfig: () => ({ ...structuredClone(DEFAULT_CONFIG), ...overrides.config }),
-    classify: overrides.classify
-      ? async (input) => {
-          classifyCalls.push(input);
-          return overrides.classify!(input);
+    classify: async (input) => {
+      classifyCalls.push(input);
+      return (
+        overrides.classify?.(input) ?? {
+          choice: "safe",
+          probabilities: { safe: 0.99, unsafe: 0.005, unsure: 0.005 },
+          confidence: 0.98,
         }
-      : async (input) => {
-          classifyCalls.push(input);
-          return { choice: "safe", probabilities: { safe: 0.99, unsafe: 0.005, unsure: 0.005 }, confidence: 0.98 };
-        },
-    askOperator: overrides.askOperator ?? (async () => "deny"),
+      );
+    },
+    askOperator: async (prompt) => {
+      asked.push(prompt);
+      return overrides.askOperator?.(prompt) ?? "deny";
+    },
     notify: (line) => notified.push(line),
     writeLog: (record) => log.push(record),
-    addGrant: overrides.addGrant ?? (async (rule) => { grants.push(rule); }),
+    scanSecrets: async (tool, args) => overrides.scanSecrets?.(tool, args),
   };
-  return { deps, log, notified, grants, classifyCalls };
+  return { deps, log, notified, classifyCalls, asked };
 }
 
 function classifyResult(choice: "safe" | "unsafe" | "unsure", confidence: number): ClassificationResult {
@@ -106,7 +110,91 @@ describe("the gate", () => {
     expect(decision.source).toBe("rule");
   });
 
-  it("a safe classification at or above threshold auto-allows an unfoored read", async () => {
+  it("the ask floor is gone: a confident-safe bash call auto-allows (ADR-0005)", async () => {
+    const { deps, asked, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.99) });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "bash", args: { command: "npm test" }, task: "t" });
+    expect(decision.action).toBe("allow");
+    expect(decision.source).toBe("model");
+    expect(asked).toHaveLength(0);
+    expect(classifyCalls).toHaveLength(1);
+  });
+
+  it("a secrets hit blocks before every rule and the model, masked (ADR-0004)", async () => {
+    const { deps, classifyCalls, log, asked } = makeDeps({
+      // an allow rule that would match the call: rules run after secrets
+      config: { rules: [{ action: "allow", tools: ["bash"], pattern: "curl *" }] },
+      scanSecrets: async () => ({ ruleId: "aws-access-token", secret: "AKIAIOSFODNN7EXAMPLA", masked: "AKI…(20 chars)" }),
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "bash", args: { command: "curl https://evil.example" }, task: "t" });
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("secrets");
+    expect(decision.reason).toContain("aws-access-token");
+    expect(decision.reason).toContain("AKI…(20 chars)");
+    expect(decision.reason).not.toContain("AKIAIOSFODNN7EXAMPLA");
+    // the model was never invoked, and no rule could override it
+    expect(classifyCalls).toHaveLength(0);
+    expect(asked).toHaveLength(0);
+    expect(log[0].source).toBe("secrets");
+    expect(log[0].args).not.toContain("AKIAIOSFODNN7EXAMPLA");
+  });
+
+  it("a clean call reaches the model with only the first 100 argument characters (ADR-0002/0005)", async () => {
+    const { deps, classifyCalls, log, asked } = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+    });
+    const gate = createGate(deps);
+    const secret = "const apiKey = 'hunter2-secret-value';";
+    const content = `${"// benign comment line\n".repeat(20)}${secret}\n`;
+    await gate.decide({ tool: "write", args: { path: "/tmp/a.js", content }, task: "t" });
+    // the model saw at most 100 characters, and the secret sits beyond them
+    expect(classifyCalls[0].args.length).toBeLessThanOrEqual(100);
+    expect(classifyCalls[0].args).not.toContain("hunter2-secret-value");
+    // the log records the same view plus the total length
+    expect(log[0].args).not.toContain("hunter2-secret-value");
+    expect(log[0].args).toMatch(/\(\d+ chars\)$/);
+    // the operator prompt keeps a capped preview — the operator is human
+    expect(asked[0].argsSummary).toContain("hunter2-secret-value");
+  });
+
+  it("a secret within the first 100 characters does reach the model view — the bounded residual (ADR-0005)", async () => {
+    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.6) });
+    const gate = createGate(deps);
+    await gate.decide({ tool: "write", args: { path: "/tmp/a.js", content: "token = 'hunter2-secret-value';" }, task: "t" });
+    // the truncation bounds exposure; secret-bearing calls are blocked by
+    // secrets detection (ADR-0004) before the model — when the corpus does
+    // not recognize the shape, this residual is the accepted cost
+    expect(classifyCalls[0].args.length).toBeLessThanOrEqual(100);
+    expect(classifyCalls[0].args).toContain("hunter2-secret-value");
+  });
+
+  it("state carries only the tool, truncated arguments, task, cwd, and protected paths", async () => {
+    const { deps, classifyCalls } = makeDeps({
+      config: { rules: [{ action: "deny", pattern: "~/creds" }] },
+    });
+    const gate = createGate(deps);
+    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "read the file" });
+    const state = classifyCalls[0];
+    expect(Object.keys(state)).toEqual(["tool", "args", "task", "cwd", "protectedPaths", "policy"]);
+    // the gate's own dirs ride along as a backstop (ADR-0003)
+    expect(state.protectedPaths).toContain("/home/op/.pi/agent/gate");
+    expect(state.protectedPaths).toContain("~/creds");
+    expect(state.args).toContain("/tmp/a");
+  });
+
+  it("the model state carries the session's gate dirs and working directory", async () => {
+    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
+    const gate = createGate(deps);
+    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t", cwd: "/proj" });
+    expect(classifyCalls[0].protectedPaths).toContain("/home/op/.pi/agent/gate");
+    expect(classifyCalls[0].protectedPaths).toContain("/proj/.pi/gate");
+    // the working directory rides along so "outside the project" judgments
+    // are decidable against something the model can see
+    expect(classifyCalls[0].cwd).toBe("/proj");
+  });
+
+  it("a safe classification at or above threshold auto-allows", async () => {
     const { deps, notified } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
     const gate = createGate(deps);
     const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
@@ -125,13 +213,12 @@ describe("the gate", () => {
     expect(decision.source).toBe("model");
   });
 
-  it("below-threshold classifications route to the operator", async () => {
-    const asked: any[] = [];
-    const { deps } = makeDeps({
+  it("below-threshold classifications route to the operator with allow/deny outcomes", async () => {
+    const { deps, asked } = makeDeps({
       classify: async () => classifyResult("safe", 0.6),
       askOperator: async (p) => {
         asked.push(p);
-        return "allow-once";
+        return "allow";
       },
     });
     const gate = createGate(deps);
@@ -140,6 +227,31 @@ describe("the gate", () => {
     expect(asked[0].classification).toBe("safe");
     expect(decision.action).toBe("allow");
     expect(decision.source).toBe("operator");
+  });
+
+  it("operator denies and no-UI block; nothing is cached or persisted (ADR-0005)", async () => {
+    const denied = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => "deny",
+    });
+    const denyGate = createGate(denied.deps);
+    const deniedDecision = await denyGate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(deniedDecision.action).toBe("block");
+    expect(deniedDecision.source).toBe("operator");
+
+    // a re-issued identical call classifies and asks again — no session cache
+    await denyGate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(denied.classifyCalls).toHaveLength(2);
+    expect(denied.asked).toHaveLength(2);
+
+    const blocked = makeDeps({
+      classify: async () => classifyResult("safe", 0.6),
+      askOperator: async () => "no-ui",
+    });
+    const noUiGate = createGate(blocked.deps);
+    const noUiDecision = await noUiGate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(noUiDecision.action).toBe("block");
+    expect(noUiDecision.reason).toContain("no UI available");
   });
 
   it("an explicit unsure routes to the operator even at high confidence", async () => {
@@ -151,75 +263,6 @@ describe("the gate", () => {
     const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
     expect(decision.action).toBe("block");
     expect(decision.source).toBe("operator");
-  });
-
-  it("the ask floor stops a safe-classified bash call from auto-allowing", async () => {
-    const asked: any[] = [];
-    const { deps } = makeDeps({
-      classify: async () => classifyResult("safe", 0.99),
-      askOperator: async (p) => {
-        asked.push(p);
-        return "allow-once";
-      },
-    });
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "bash", args: { command: "ls" }, task: "t" });
-    expect(asked[0].reason).toContain("ask floor");
-    expect(decision.action).toBe("allow");
-    expect(decision.source).toBe("operator");
-  });
-
-  it("a floored tool is auto-blocked when the model is confidently unsafe", async () => {
-    const { deps } = makeDeps({ classify: async () => classifyResult("unsafe", 0.97) });
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "bash", args: { command: "ls" }, task: "t" });
-    expect(decision.action).toBe("block");
-    expect(decision.source).toBe("model");
-  });
-
-  it("allow-always writes a grant rule scoped to the call's pattern", async () => {
-    const { deps, grants } = makeDeps({
-      classify: async () => classifyResult("safe", 0.99),
-      askOperator: async () => "allow-always",
-    });
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "bash", args: { command: "ls ~/work" }, task: "t" });
-    expect(decision.action).toBe("allow");
-    expect(grants).toEqual([{ action: "allow", tools: ["bash"], pattern: "ls ~/work" }]);
-  });
-
-  it("a grant-write failure still allows the call but is surfaced to the operator", async () => {
-    const { deps, notified } = makeDeps({
-      classify: async () => classifyResult("safe", 0.99),
-      askOperator: async () => "allow-always",
-      addGrant: async () => {
-        throw new Error("disk full");
-      },
-    });
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "bash", args: { command: "ls ~/work" }, task: "t" });
-    expect(decision.action).toBe("allow");
-    expect(decision.reason).toContain("grant rule failed to persist");
-    expect(notified.some((n) => n.includes("grant rule failed to persist"))).toBe(true);
-  });
-
-  it("the session cache short-circuits identical re-issued calls", async () => {
-    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
-    const gate = createGate(deps);
-    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(first.source).toBe("model");
-    expect(second.action).toBe("allow");
-    expect(second.source).toBe("cache");
-    expect(classifyCalls).toHaveLength(1);
-  });
-
-  it("a different task does not reuse the cache", async () => {
-    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
-    const gate = createGate(deps);
-    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t1" });
-    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t2" });
-    expect(classifyCalls).toHaveLength(2);
   });
 
   it("model failure with failMode ask routes to the operator with a model-unavailable reason", async () => {
@@ -238,101 +281,30 @@ describe("the gate", () => {
     expect(asked[0].reason).toContain("model unavailable");
     expect(decision.action).toBe("block");
     expect(decision.source).toBe("fail");
+    expect(decision.reason).toContain("operator denied");
   });
 
-  it("model failure with failMode block blocks without asking", async () => {
-    const asked = vi.fn();
+  it("model failure with failMode block denies (headless)", async () => {
     const { deps } = makeDeps({
       config: { failMode: "block" },
       classify: async () => {
-        throw new Error("timeout");
-      },
-      askOperator: async () => {
-        asked();
-        return "allow-once";
+        throw new Error("ECONNREFUSED");
       },
     });
     const gate = createGate(deps);
     const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
     expect(decision.action).toBe("block");
     expect(decision.source).toBe("fail");
-    expect(asked).not.toHaveBeenCalled();
+    expect(decision.reason).toContain("model unavailable");
   });
 
-  it("no UI to confirm blocks rather than opening the gate", async () => {
+  it("self-protection: always denies agent writes to the config, even while disabled with an allow rule", async () => {
     const { deps } = makeDeps({
-      classify: async () => classifyResult("safe", 0.6),
-      askOperator: async () => "no-ui",
+      config: {
+        enabled: false,
+        rules: [{ action: "allow", tools: ["write"], pattern: "~/.pi/agent/gate/**" }],
+      },
     });
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(decision.action).toBe("block");
-    expect(decision.source).toBe("operator");
-  });
-
-  it("state carries only the tool, arguments, task, and protected paths", async () => {
-    const { deps, classifyCalls } = makeDeps({
-      config: { rules: [{ action: "deny", pattern: "~/creds" }] },
-    });
-    const gate = createGate(deps);
-    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "read the file" });
-    const state = classifyCalls[0];
-    expect(Object.keys(state)).toEqual(["tool", "args", "task", "protectedPaths", "policy"]);
-    // the gate's own dirs ride along as a backstop (ADR-0003)
-    expect(state.protectedPaths).toEqual(["/home/op/.pi/agent/gate", "~/creds"]);
-    expect(state.args).toContain("/tmp/a");
-  });
-
-  it("self-protection: always denies agent writes to the config, even with an allow rule", async () => {
-    const { deps } = makeDeps({
-      config: { rules: [{ action: "allow", tools: ["write"], pattern: "~/.pi/agent/gate/**" }] },
-    });
-    const gate = createGate(deps);
-    const decision = await gate.decide({
-      tool: "write",
-      args: { path: "/home/op/.pi/agent/gate/config.json", content: "{}" },
-      task: "disable the gate",
-    });
-    expect(decision.action).toBe("block");
-    expect(decision.source).toBe("protected");
-    expect(decision.reason).toContain("protect");
-  });
-
-  it("self-protection: denies reads of the config and decision log", async () => {
-    const { deps } = makeDeps();
-    const gate = createGate(deps);
-    for (const path of ["/home/op/.pi/agent/gate/config.json", "/home/op/.pi/agent/gate/decisions.jsonl.1"]) {
-      const decision = await gate.decide({ tool: "read", args: { path }, task: "t" });
-      expect(decision.action).toBe("block");
-      expect(decision.source).toBe("protected");
-    }
-  });
-
-  it("self-protection: denies bash commands touching gate paths without consulting the model", async () => {
-    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.99) });
-    const gate = createGate(deps);
-    for (const command of [
-      "echo {} > /home/op/.pi/agent/gate/config.json",
-      "rm /home/op/.pi/agent/gate/decisions.jsonl",
-      "cat ~/.pi/agent/gate/config.json",
-    ]) {
-      const decision = await gate.decide({ tool: "bash", args: { command }, task: "t" });
-      expect(decision.action).toBe("block");
-      expect(decision.source).toBe("protected");
-    }
-    expect(classifyCalls).toHaveLength(0);
-  });
-
-  it("self-protection: denies relative project gate paths", async () => {
-    const { deps } = makeDeps();
-    const gate = createGate(deps);
-    const decision = await gate.decide({ tool: "bash", args: { command: "cat .pi/gate/config.json" }, task: "t", cwd: "/proj" });
-    expect(decision.action).toBe("block");
-    expect(decision.source).toBe("protected");
-  });
-
-  it("self-protection applies even when the gate is disabled", async () => {
-    const { deps } = makeDeps({ config: { enabled: false } });
     const gate = createGate(deps);
     const decision = await gate.decide({
       tool: "write",
@@ -353,128 +325,5 @@ describe("the gate", () => {
     const decision = await gate.decide({ tool: "read", args: { path: "/home/op/notes.pi/gatekeeper/x.md" }, task: "t" });
     expect(decision.action).toBe("allow");
     expect(decision.source).toBe("model");
-  });
-
-  it("huge arguments are capped by the state budget", async () => {
-    const { deps, classifyCalls } = makeDeps();
-    const gate = createGate(deps);
-    const huge = { path: "/tmp/a", content: "x".repeat(50000) };
-    await gate.decide({ tool: "write", args: huge, task: "t" });
-    expect(classifyCalls[0].args.length).toBeLessThanOrEqual(4100);
-  });
-
-  it("write and edit contents never reach the model state or the log; the operator keeps a preview", async () => {
-    const asked: any[] = [];
-    const { deps, log, classifyCalls } = makeDeps({
-      classify: async () => classifyResult("safe", 0.99),
-      askOperator: async (p) => {
-        asked.push(p);
-        return "deny";
-      },
-    });
-    const gate = createGate(deps);
-    const secret = "const apiKey = 'hunter2';";
-    await gate.decide({ tool: "write", args: { path: "/tmp/a", content: secret }, task: "t" });
-    expect(classifyCalls[0].args).not.toContain("hunter2");
-    expect(JSON.parse(classifyCalls[0].args).content).toBe(`<${secret.length} chars omitted>`);
-    expect(log[0].args).not.toContain("hunter2");
-    // the operator prompt keeps its capped preview — the operator is human
-    expect(asked[0].argsSummary).toContain("hunter2");
-  });
-
-  it("edit's nested edits[] old/new text is redacted recursively", async () => {
-    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("unsafe", 0.99) });
-    const gate = createGate(deps);
-    await gate.decide({
-      tool: "edit",
-      args: { path: "/tmp/a", edits: [{ oldText: "hunter2", newText: "hunter3" }] },
-      task: "t",
-    });
-    expect(classifyCalls[0].args).not.toContain("hunter2");
-    expect(classifyCalls[0].args).not.toContain("hunter3");
-    expect(classifyCalls[0].args).toContain("/tmp/a");
-  });
-
-  it("operator allow-once is never cached — an identical re-issued call asks again", async () => {
-    const asked: any[] = [];
-    const { deps, classifyCalls } = makeDeps({
-      classify: async () => classifyResult("safe", 0.6),
-      askOperator: async () => {
-        asked.push(1);
-        return "allow-once";
-      },
-    });
-    const gate = createGate(deps);
-    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(first.action).toBe("allow");
-    expect(first.source).toBe("operator");
-    expect(second.source).toBe("operator"); // not "cache": allow-once means once
-    expect(asked).toHaveLength(2);
-    expect(classifyCalls).toHaveLength(2);
-  });
-
-  it("operator allow-for-session caches the approval for identical calls in the task", async () => {
-    const asked: any[] = [];
-    const { deps, classifyCalls } = makeDeps({
-      classify: async () => classifyResult("safe", 0.6),
-      askOperator: async () => {
-        asked.push(1);
-        return "allow-session";
-      },
-    });
-    const gate = createGate(deps);
-    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(first.source).toBe("operator");
-    expect(second.action).toBe("allow");
-    expect(second.source).toBe("cache");
-    expect(asked).toHaveLength(1);
-    expect(classifyCalls).toHaveLength(1);
-  });
-
-  it("operator denies are cached — a re-issued denied call does not nag the operator", async () => {
-    const asked: any[] = [];
-    const { deps } = makeDeps({
-      classify: async () => classifyResult("safe", 0.6),
-      askOperator: async () => {
-        asked.push(1);
-        return "deny";
-      },
-    });
-    const gate = createGate(deps);
-    const first = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    const second = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(first.action).toBe("block");
-    expect(second.action).toBe("block");
-    expect(second.source).toBe("cache");
-    expect(asked).toHaveLength(1);
-  });
-
-  it("the model state carries the session's gate dirs as protected paths", async () => {
-    const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
-    const gate = createGate(deps);
-    await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t", cwd: "/proj" });
-    expect(classifyCalls[0].protectedPaths).toContain("/home/op/.pi/agent/gate");
-    expect(classifyCalls[0].protectedPaths).toContain("/proj/.pi/gate");
-  });
-
-  it("an allow-always file grant pins the cwd-absolute path, and is not cached", async () => {
-    const asked: any[] = [];
-    const { deps, grants } = makeDeps({
-      classify: async () => classifyResult("safe", 0.6),
-      askOperator: async () => {
-        asked.push(1);
-        return "allow-always";
-      },
-    });
-    const gate = createGate(deps);
-    const first = await gate.decide({ tool: "write", args: { path: "build/out.js", content: "x" }, task: "t", cwd: "/proj" });
-    expect(first.action).toBe("allow");
-    expect(grants).toEqual([{ action: "allow", tools: ["write"], pattern: "/proj/build/out.js" }]);
-    // the grant rule answers repetition at the rule layer, not the session cache
-    const second = await gate.decide({ tool: "write", args: { path: "build/out.js", content: "x" }, task: "t", cwd: "/proj" });
-    expect(second.source).toBe("operator"); // not "cache"
-    expect(asked).toHaveLength(2);
   });
 });

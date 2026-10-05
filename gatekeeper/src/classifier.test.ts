@@ -38,6 +38,7 @@ describe("System One classifier", () => {
       tool: "bash",
       args: '{"command":"ls ~"}',
       task: "explore the repo",
+      cwd: "/home/op/code",
       protectedPaths: ["~/.zshrc"],
       policy: "the policy text",
     });
@@ -46,11 +47,13 @@ describe("System One classifier", () => {
     const body = requests[0].body as Record<string, any>;
     expect(body.model).toBe("clef-flash");
     expect(body.keep_alive).toBe("10m");
-    // state invariant: tool, agent arguments, operator task, protected paths — nothing else
+    // state invariant: tool, agent arguments, operator task, working
+    // directory, protected paths — nothing else
     expect(body.state).toEqual({
       tool: "bash",
       arguments: '{"command":"ls ~"}',
       task: "explore the repo",
+      cwd: "/home/op/code",
       protectedPaths: ["~/.zshrc"],
     });
     expect(body.questions.safety.type).toBe("choice");
@@ -72,6 +75,8 @@ describe("System One classifier", () => {
     await classifier.classify({ tool: "read", args: "{}", task: "t", protectedPaths: [], policy: "p" });
     // header capture isn't wired in the stub; verify the URL and that it was called
     expect(requests[0].url).toBe("https://jev.example.com/v1/systemone");
+    // cwd is omitted from the state when absent
+    expect(requests[0].body.state.cwd).toBeUndefined();
   });
 
   it("omits keep_alive when keepAlive is empty, for strict endpoints", async () => {
@@ -93,6 +98,22 @@ describe("System One classifier", () => {
     const result = await classifier.classify({ tool: "read", args: "{}", task: "t", protectedPaths: [], policy: "p" });
     expect(result.choice).toBe("unsafe");
     expect(result.confidence).toBe(0.95);
+  });
+
+  it("the debug hook receives the exact request body and the answer", async () => {
+    const { requests, fetchFn } = stubEndpoint(() => cannedAnswer);
+    const seen: { request: unknown; answer: unknown }[] = [];
+    const classifier = createSystemOneClassifier(
+      { url: "http://localhost:11434/v1/systemone", model: "clef-flash", timeoutMs: 5000, keepAlive: "10m" },
+      fetchFn,
+      { onExchange: (request, answer) => seen.push({ request, answer }) },
+    );
+    const result = await classifier.classify({ tool: "read", args: "{}", task: "t", cwd: "/p", protectedPaths: [], policy: "p" });
+    expect(seen).toHaveLength(1);
+    // the exact body that was posted, and the answer the gate acted on
+    expect(seen[0].request).toStrictEqual(requests[0].body);
+    expect(seen[0].answer).toMatchObject({ type: "choice", choice: "unsafe", confidence: 0.95 });
+    expect(result.choice).toBe("unsafe");
   });
 
   it("propagates HTTP and network errors to the decision layer", async () => {

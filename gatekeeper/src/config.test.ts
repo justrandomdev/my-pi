@@ -5,7 +5,11 @@ describe("config resolution", () => {
   it("defaults to the documented posture", () => {
     expect(DEFAULT_CONFIG.threshold).toBe(0.85);
     expect(DEFAULT_CONFIG.rules).toEqual([{ action: "allow", tools: ["ls", "find"] }]);
-    expect(DEFAULT_CONFIG.floors).toEqual({ bash: true, powershell: true, edit: true, write: true });
+    expect(DEFAULT_CONFIG.secrets).toEqual({
+      enabled: true,
+      autoUpdate: true,
+      source: "https://raw.githubusercontent.com/gitleaks/gitleaks/refs/heads/master/config/gitleaks.toml",
+    });
     expect(DEFAULT_CONFIG.endpoint.url).toBe("http://localhost:11434/v1/systemone");
     expect(DEFAULT_CONFIG.endpoint.model).toBe("clef-flash");
     expect(DEFAULT_CONFIG.endpoint.timeoutMs).toBe(30_000);

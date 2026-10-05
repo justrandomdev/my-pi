@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createGatekeeper } from "./index.js";
 
 const HOME = "/home/op";
+const bundledSnapshot = join(dirname(fileURLToPath(import.meta.url)), "../gitleaks.toml");
 
 let userHome: string; // stand-in home for config/log paths
 let projectDir: string;
@@ -12,6 +14,13 @@ let projectDir: string;
 beforeEach(async () => {
   userHome = await mkdtemp(join(tmpdir(), "gk-home-"));
   projectDir = await mkdtemp(join(tmpdir(), "gk-proj-"));
+  // autoUpdate off by default: the extension tests stay offline and
+  // deterministic (the updater has its own fetch-stubbed tests below)
+  await mkdir(join(userHome, ".pi/agent/gate"), { recursive: true });
+  await writeFile(
+    join(userHome, ".pi/agent/gate/config.json"),
+    JSON.stringify({ secrets: { autoUpdate: false } }),
+  );
 });
 afterEach(async () => {
   await rm(userHome, { recursive: true, force: true });
@@ -92,16 +101,40 @@ async function setup(
 ) {
   const { pi, captured } = fakePi();
   const env = makeEnv(canned);
-  createGatekeeper(pi, { home: userHome, fetchFn: fetchOverride ?? env.fetchFn });
+  await createGatekeeper(pi, { home: userHome, fetchFn: fetchOverride ?? env.fetchFn });
   return { captured, env };
 }
 
+/** A fetch stub serving gitleaks TOML at the source URL, classifier JSON elsewhere. */
+function makeFetch(serves: string) {
+  return (async (url: string | URL | Request, init?: RequestInit) => {
+    const target = String(url);
+    if (target.includes("gitleaks")) {
+      return { ok: true, status: 200, text: async () => serves } as Response;
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        answers: {
+          safety: {
+            type: "choice",
+            choice: "safe",
+            probabilities: { safe: 0.9, unsafe: 0.05, unsure: 0.05 },
+            confidence: 0.9,
+          },
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+}
+
 describe("gatekeeper extension", () => {
-  it("registers the tool_call handler and the four commands", () => {
+  it("registers the tool_call handler and the five commands", () => {
     const { pi, captured } = fakePi();
     createGatekeeper(pi, { home: userHome });
     expect(captured.events.has("tool_call")).toBe(true);
-    expect([...captured.commands.keys()].sort()).toEqual(["gate", "gate:config", "gate:log", "gate:rules"]);
+    expect([...captured.commands.keys()].sort()).toEqual(["gate", "gate:config", "gate:log", "gate:rules", "gate:secrets"]);
   });
 
   it("an allow rule passes ls through without consulting the model", async () => {
@@ -126,19 +159,27 @@ describe("gatekeeper extension", () => {
     expect(result?.reason).toContain("unsafe");
   });
 
-  it("a floored bash call asks the operator even when classified safe", async () => {
+  it("the ask floor is gone: a confident-safe bash call auto-allows (ADR-0005)", async () => {
     const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "npm test" } });
+    expect(result).toBeUndefined();
+    expect(env.ui.selected).toHaveLength(0);
+    expect(env.requests).toHaveLength(1);
+  });
+
+  it("a below-threshold bash call asks the operator with Allow/Deny only", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.6 });
     const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
     expect(env.ui.selected).toHaveLength(1);
-    expect(env.ui.selected[0].options).toEqual(["Allow once", "Allow for session", "Allow always", "Deny"]);
+    expect(env.ui.selected[0].options).toEqual(["Allow", "Deny"]);
     expect(env.ui.selected[0].title).toContain("bash");
     // the stub operator picks Deny
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain("operator denied");
   });
 
-  it("uses the custom bordered prompt when the mode provides ui.custom", async () => {
-    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+  it("uses the custom bordered prompt when the mode provides ui.custom; y allows, nothing persists", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.6 });
     let component: any;
     const ctx = env.ctx();
     ctx.ui.custom = (async (factory: any) =>
@@ -152,22 +193,14 @@ describe("gatekeeper extension", () => {
     const lines = component.render(80) as string[];
     expect(lines[0].startsWith("╭")).toBe(true);
     expect(lines[lines.length - 1].endsWith("╯")).toBe(true);
-    // pressing a settles the dialog; allow-always writes the grant
-    component.handleInput("a");
+    // pressing y settles the dialog; nothing persists (ADR-0005)
+    component.handleInput("y");
     const result = await pending;
     expect(result).toBeUndefined();
     expect(env.ui.selected).toHaveLength(0); // the selector was not used
-    // the grant write is fire-and-forget; poll until it lands
     const configPath = join(userHome, ".pi/agent/gate/config.json");
-    let rules: any[] = [];
-    for (let i = 0; i < 50 && rules.length < 1; i++) {
-      try {
-        rules = (JSON.parse(await readFile(configPath, "utf8")) ?? {}).rules ?? [];
-      } catch {
-        await new Promise((r) => setTimeout(r, 20));
-      }
-    }
-    expect(rules).toContainEqual({ action: "allow", tools: ["bash"], pattern: "ls ~/work" });
+    const cfg = JSON.parse(await readFile(configPath, "utf8"));
+    expect(cfg.rules).toBeUndefined(); // no grant was written
   });
 
   it("gate:rules rm removes exactly the listed rule and preserves the rest", async () => {
@@ -197,7 +230,7 @@ describe("gatekeeper extension", () => {
   });
 
   it("a dismissed operator dialog denies", async () => {
-    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.6 });
     env.ui.select = async (): Promise<string | undefined> => undefined;
     const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls" } });
     expect(result?.block).toBe(true);
@@ -214,12 +247,13 @@ describe("gatekeeper extension", () => {
     expect(result?.reason).toContain("model unavailable");
   });
 
-  it("the current task from before_agent_start rides in the model state", async () => {
+  it("the current task and working directory from the session ride in the model state", async () => {
     const { captured, env } = await setup({ choice: "safe", confidence: 0.9 });
     const startHandler = captured.events.get("before_agent_start")![0];
     startHandler({ type: "before_agent_start", prompt: "clean up the tmp folder" }, env.ctx());
     await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/tmp/a" } });
     expect(env.requests[0].state.task).toBe("clean up the tmp folder");
+    expect(env.requests[0].state.cwd).toBe(projectDir);
   });
 
   it("every decision lands in the JSONL decision log", async () => {
@@ -431,16 +465,298 @@ describe("gatekeeper extension", () => {
     expect(env.requests).toHaveLength(0);
   });
 
-  it("the plain selector maps Allow for session to a cached session allow", async () => {
-    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+  it("the plain selector maps Allow, and nothing is cached: a re-issued call asks again", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.6 });
     env.ui.select = async (title: string, options: string[]): Promise<string | undefined> => {
       env.ui.selected.push({ title, options });
-      return options[1]; // "Allow for session"
+      return options[0]; // "Allow"
     };
     const first = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
     expect(first).toBeUndefined();
     const second = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
     expect(second).toBeUndefined();
-    expect(env.ui.selected).toHaveLength(1); // the second came from the session cache
+    // no session cache (ADR-0005): the second call classified and asked again
+    expect(env.ui.selected).toHaveLength(2);
+    expect(env.requests).toHaveLength(2);
+  });
+
+  it("a secret-bearing write blocks before the model with a masked reason (ADR-0004)", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    // the secret sits past the first 100 characters, so the truncated log
+    // view cannot hold it — the scan sees the full content regardless
+    const content = `${"x".repeat(90)}\naws_key = AKIAIOSFODNN7EXAMPLA\n`;
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content },
+    });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("aws-access-token");
+    expect(result?.reason).toContain("AKI…(20 chars)");
+    expect(result?.reason).not.toContain("AKIAIOSFODNN7EXAMPLA");
+    expect(result?.reason).toContain("secrets.toml");
+    // the model was never consulted and no secret landed in the log
+    expect(env.requests).toHaveLength(0);
+    const logPath = join(userHome, ".pi/agent/gate/decisions.jsonl");
+    let logText = "";
+    for (let i = 0; i < 50 && !logText; i++) {
+      try {
+        logText = await readFile(logPath, "utf8");
+      } catch {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    expect(logText).toContain("\"source\":\"secrets\"");
+    expect(logText).not.toContain("AKIAIOSFODNN7EXAMPLA");
+  });
+
+  it("secrets.enabled false turns detection off (the single switch, ADR-0005)", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({ secrets: { enabled: false, autoUpdate: false } }),
+    );
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "aws_key = AKIAIOSFODNN7EXAMPLA\n" },
+    });
+    expect(result).toBeUndefined();
+    expect(env.requests).toHaveLength(1); // the model decided it
+  });
+
+  it("the operator's secrets.toml overrides ride ahead and suppress, hot-reloading", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/secrets.toml"),
+      ['[[allow]]', 'id = "aws-access-token"'].join("\n"),
+    );
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    // suppressed: goes to the model and auto-allows
+    const first = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "aws_key = AKIAIOSFODNN7EXAMPLA\n" },
+    });
+    expect(first).toBeUndefined();
+    expect(env.requests).toHaveLength(1);
+    // removing the override hot-reloads back to blocking
+    await rm(join(userHome, ".pi/agent/gate/secrets.toml"), { force: true });
+    const second = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "aws_key = AKIAIOSFODNN7EXAMPLA\n" },
+    });
+    expect(second?.block).toBe(true);
+    expect(second?.reason).toContain("aws-access-token");
+  });
+
+  it("an agent tool call touching secrets.toml is denied by self-protection (ADR-0003)", async () => {
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "read",
+      input: { path: join(userHome, ".pi/agent/gate/secrets.toml") },
+    });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("protects its own");
+    expect(env.requests).toHaveLength(0);
+  });
+
+  it("the auto-update adopts a fetched corpus and notifies on change, writing the snapshot only", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({ secrets: { autoUpdate: true } }),
+    );
+    const bundled = await readFile(bundledSnapshot, "utf8");
+    const fetched = `${bundled}\n[[rules]]\nid = "test-extra"\nregex = "test-extra-[a-z]{10}"\nkeywords = ["test-extra-"]\n`;
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: makeFetch(fetched) });
+    // the update notice is flushed at the first before_agent_start
+    captured.events.get("before_agent_start")![0]({ prompt: "do things" }, env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("secrets") && n.includes("updated"))).toBe(true);
+    // the snapshot landed in the gate dir; secrets.toml was never touched
+    const snapshot = await readFile(join(userHome, ".pi/agent/gate/gitleaks.toml"), "utf8");
+    expect(snapshot).toContain("test-extra");
+    let overridesExist = true;
+    try {
+      await stat(join(userHome, ".pi/agent/gate/secrets.toml"));
+    } catch {
+      overridesExist = false;
+    }
+    expect(overridesExist).toBe(false);
+    // and the new rule detects through a tool call
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "test-extra-abcdefghij" },
+    });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("test-extra");
+  });
+
+  it("an unchanged corpus stays silent; a failed fetch warns and keeps the current rules", async () => {
+    const bundled = await readFile(bundledSnapshot, "utf8");
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: makeFetch(bundled) });
+    captured.events.get("before_agent_start")![0]({ prompt: "do things" }, env.ctx());
+    // unchanged: nothing was notified (ADR-0004 — only change or failure)
+    expect(env.ui.notified.filter((n) => n.includes("secrets"))).toHaveLength(0);
+    // the same engine still blocks secret-bearing calls
+    const still = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "aws_key = AKIAIOSFODNN7EXAMPLA\n" },
+    });
+    expect(still?.block).toBe(true);
+  });
+
+  it("the sanity gate rejects a collapsing corpus and keeps the previous snapshot", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({ secrets: { autoUpdate: true } }),
+    );
+    const tiny = ['[[rules]]', 'id = "one-rule"', 'regex = "one-rule-[a-z]{6}"', 'keywords = ["one-rule-"]'].join("\n");
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: makeFetch(tiny) });
+    captured.events.get("before_agent_start")![0]({ prompt: "do things" }, env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("sanity gate"))).toBe(true);
+    // no snapshot was written, and the bundled rules still detect
+    let snapshotExists = true;
+    try {
+      await stat(join(userHome, ".pi/agent/gate/gitleaks.toml"));
+    } catch {
+      snapshotExists = false;
+    }
+    expect(snapshotExists).toBe(false);
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: "aws_key = AKIAIOSFODNN7EXAMPLA\n" },
+    });
+    expect(result?.block).toBe(true);
+  });
+
+  it("an invalid fetched corpus warns and keeps the current rules", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({ secrets: { autoUpdate: true } }),
+    );
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: makeFetch("this is not toml ]]]") });
+    captured.events.get("before_agent_start")![0]({ prompt: "do things" }, env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("failed"))).toBe(true);
+  });
+
+  it("gate:secrets status reports the engine, and test masks its hits", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:secrets")!.handler;
+    const ctx = env.ctx();
+    await handler("", ctx);
+    expect(env.ui.notified.some((n) => n.includes("gitleaks rules active"))).toBe(true);
+    expect(env.ui.notified.some((n) => n.includes(join(userHome, ".pi/agent/gate/secrets.toml")))).toBe(true);
+    await handler('test "AKIAIOSFODNN7EXAMPLA"', ctx);
+    const hit = env.ui.notified.find((n) => n.includes("hit —"));
+    expect(hit).toContain("aws-access-token");
+    expect(hit).toContain("AKI…(20 chars)");
+    expect(hit).not.toContain("AKIAIOSFODNN7EXAMPLA");
+  });
+
+  it("gate:secrets update forces a refresh even with autoUpdate off", async () => {
+    const bundled = await readFile(bundledSnapshot, "utf8");
+    const fetched = `${bundled}\n[[rules]]\nid = "forced-rule"\nregex = "forced-[a-z]{8}"\nkeywords = ["forced-"]\n`;
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: makeFetch(fetched) });
+    const handler = captured.commands.get("gate:secrets")!.handler;
+    await handler("update", env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("updated"))).toBe(true);
+    const snapshot = await readFile(join(userHome, ".pi/agent/gate/gitleaks.toml"), "utf8");
+    expect(snapshot).toContain("forced-rule");
+  });
+
+  it("gate:config set secrets.enabled writes the secrets knob", async () => {
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:config")!.handler;
+    await handler("set secrets.enabled false", env.ctx());
+    const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg.secrets.enabled).toBe(false);
+    await handler("set secrets.source https://example.com/rules.toml", env.ctx());
+    const cfg2 = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+    expect(cfg2.secrets.source).toBe("https://example.com/rules.toml");
+    // an unknown secrets key is rejected
+    await handler("set secrets.bogus 1", env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("unknown key"))).toBe(true);
+  });
+
+  it("a tool call racing the secrets load still blocks — the handler awaits the init (ADR-0004)", async () => {
+    const bundled = await readFile(bundledSnapshot, "utf8");
+    // a large corpus widens the engine-load window into a real race
+    const extra = Array.from(
+      { length: 3000 },
+      (_, i) => `[[rules]]\nid = "big-${i}"\nregex = "bigsec-${i}-[a-z]{8}"\nkeywords = ["bigsec-${i}-"]\n`,
+    ).join("");
+    await writeFile(join(userHome, ".pi/agent/gate/gitleaks.toml"), `${bundled}\n${extra}`);
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    const init = createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn }); // deliberately not awaited
+    // built in pieces: a literal fixture here would trip the very engine under test
+    const fakeKey = ["AKIA", "IOSFODNN7EXAMPLA"].join("");
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "notes.txt", content: `aws_key = ${fakeKey}\n` },
+    });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("aws-access-token");
+    await init;
+  });
+
+  it("notify debug dumps the full model request and answer per classification", async () => {
+    await writeFile(
+      join(userHome, ".pi/agent/gate/config.json"),
+      JSON.stringify({ secrets: { autoUpdate: false }, notify: "debug" }),
+    );
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.9 });
+    await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/tmp/a" } });
+    const dump = env.ui.notified.find((n) => n.includes("gate › debug — model request:"));
+    expect(dump).toBeDefined();
+    // the exact request body: state with tool/arguments/cwd, questions, model
+    expect(dump).toContain('"model":"clef-flash"');
+    expect(dump).toContain('"tool":"read"');
+    expect(dump).toContain('"cwd":"');
+    expect(dump).toContain('"questions"');
+    // the answer the gate acted on
+    expect(dump).toContain("gate › debug — model answer:");
+    expect(dump).toContain('"choice":"safe"');
+    expect(dump).toContain('"probabilities"');
+    expect(dump).toContain('"confidence":0.9');
+    // and the regular transparency line still shows (debug implies always)
+    expect(env.ui.notified.some((n) => n.includes("read") && n.includes("allowed") && n.includes("(model)"))).toBe(true);
+  });
+
+  it("rule listings do not surface untrusted project config before trust is granted", async () => {
+    await mkdir(join(projectDir, ".pi/gate"), { recursive: true });
+    await writeFile(
+      join(projectDir, ".pi/gate/config.json"),
+      JSON.stringify({ rules: [{ action: "allow", pattern: "project-only-rule" }] }),
+    );
+    const { pi, captured } = fakePi();
+    const env = makeEnv();
+    await createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+    const handler = captured.commands.get("gate:rules")!.handler;
+    // untrusted: the project rules stay hidden
+    await handler("", env.ctx());
+    expect(env.ui.notified.some((n) => n.includes("project-only-rule"))).toBe(false);
+    // trusted: they surface
+    await handler("", env.ctx({ isProjectTrusted: () => true }));
+    expect(env.ui.notified.some((n) => n.includes("project-only-rule"))).toBe(true);
   });
 });

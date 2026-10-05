@@ -32,25 +32,33 @@ _Avoid_: verdict, outcome
 The human who approves or denies a call at the ask step.
 _Avoid_: user (collides with "user level")
 
-**Grant**:
-An operator approval persisted as a rule: always-for-this-pattern — the exact command text, or the cwd-absolute path for file tools.
-_Avoid_: permission, whitelist entry
-
 **Protected path**:
 A path or glob whose contents must not be read, modified, or exfiltrated.
 _Avoid_: blocked file, restricted file
+
+**Secrets engine**:
+The deterministic layer that scans tool-call text for credential-shaped content and blocks before rules and the model.
+_Avoid_: scanner, detector, linter
+
+**Snapshot**:
+The machine-managed copy of the secrets corpus in the gate directory, replaced by the auto-update and never edited by hand.
+_Avoid_: cache, vendor file
+
+**Override**:
+The operator's own entries for the secrets engine: extra rules and false-positive suppressions, never touched by the auto-update.
+_Avoid_: patch, config file
+
+**Masked match**:
+How a detected secret is reported: the rule id and a size peek (`sk-…(51 chars)`), never the secret itself.
+_Avoid_: redacted value, leaked token
 
 **Chain**:
 A shell command joined by separators (`&&`, `||`, `;`, `|`, `&`); rules evaluate it component by component, quotes respected.
 _Avoid_: compound command, command line
 
 **State**:
-The payload sent to the model for classification: tool name, arguments, and the current task.
+The payload sent to the model for classification: tool name, the first 100 characters of the arguments, the working directory, and the current task.
 _Avoid_: prompt, context
-
-**Ask floor**:
-A per-tool minimum action: classification can block or escalate to the operator, but never auto-allow beneath it.
-_Avoid_: deny floor, minimum permission
 
 **Policy**:
 The configurable text defining what counts as unsafe, sent to the model as classification instructions.
