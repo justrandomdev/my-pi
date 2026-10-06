@@ -12,7 +12,7 @@ Every tool call passes through the gate, in order:
 2. **Secrets detection** — the gitleaks corpus (~220 rules, compiled to a JS regex subset) scans the full command and file contents. A hit blocks before every rule and the model, masked (`sk-…(51 chars)`), overridable only by your `secrets.toml`. See [ADR-0004](docs/adr/0004-deterministic-secret-detection.md).
 3. **Rules** — ordered allow/deny entries (project rules first, then user, then shipped defaults). First hit wins; a fast-path, not a guard.
 4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator.
-5. **The operator** — a bordered prompt (classification colored green/red/yellow) with `y: allow · n/esc: deny`. Nothing persists from a prompt; persistent allows are explicit rules.
+5. **The operator** — a bordered prompt (classification and probabilities colored green/red/yellow) with `a: allow · n/esc: deny`. Nothing persists from a prompt; persistent allows are explicit rules.
 
 Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`failMode: block`, for headless use).
 

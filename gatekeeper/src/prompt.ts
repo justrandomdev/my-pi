@@ -1,7 +1,7 @@
 /**
  * The gate's operator prompt: a rounded-border box with the classification
  * line colored green (safe), red (unsafe), or yellow (unsure or unavailable).
- * Keys: y = allow, n/esc = deny. Nothing persists from a prompt (ADR-0005).
+ * Keys: a = allow, n/esc = deny. Nothing persists from a prompt (ADR-0005).
  */
 
 import type { Component } from "@earendil-works/pi-tui";
@@ -13,6 +13,7 @@ export interface GatePromptInfo {
   tool: string;
   classification?: GateClassification;
   confidence?: number;
+  probabilities?: Record<string, number>;
   reason: string;
   argsSummary: string;
 }
@@ -80,7 +81,7 @@ export function createGatePrompt(info: GatePromptInfo) {
     return {
       invalidate: () => {},
       handleInput: (data: string) => {
-        if (data === "y") settle("allow");
+        if (data === "a") settle("allow");
         else if (data === "n" || data === "\x1b") settle("deny");
       },
       render: (width: number): string[] => {
@@ -94,10 +95,14 @@ export function createGatePrompt(info: GatePromptInfo) {
         const plain: string[] = [];
         const classificationPlain = `Classification: ${value}`;
         plain.push(classificationPlain);
+        const entries = Object.entries(info.probabilities ?? {});
+        if (entries.length) {
+          plain.push(`Probabilities: ${entries.map(([k, v]) => `${k} ${v.toFixed(2)}`).join(" · ")}`);
+        }
         plain.push(`Reason: ${info.reason}`);
         for (const line of wrap(info.argsSummary, inner - 2)) plain.push(line);
         plain.push("");
-        plain.push("y: allow · n/esc: deny");
+        plain.push("a: allow · n/esc: deny");
 
         const lines: string[] = [top];
         for (const text of plain) {
@@ -107,9 +112,14 @@ export function createGatePrompt(info: GatePromptInfo) {
             lines.push(
               `│ ${padded.replace(value, theme.fg(color, theme.bold(value)))} │`,
             );
-          } else if (text.startsWith("y: allow")) {
+          } else if (text.startsWith("a: allow")) {
             lines.push(`│ ${theme.fg("dim", padded)} │`);
-          } else if (text.startsWith("Reason:") || info.argsSummary.includes(text) || text === "") {
+          } else if (
+            text.startsWith("Reason:") ||
+            text.startsWith("Probabilities:") ||
+            info.argsSummary.includes(text) ||
+            text === ""
+          ) {
             lines.push(`│ ${padded} │`);
           } else {
             lines.push(`│ ${theme.fg("dim", padded)} │`);

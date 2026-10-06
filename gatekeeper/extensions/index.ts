@@ -302,6 +302,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
             tool: prompt.tool,
             classification: prompt.classification,
             confidence: prompt.confidence,
+            probabilities: prompt.probabilities,
             reason: prompt.reason,
             argsSummary: prompt.argsSummary,
           }),
@@ -313,8 +314,14 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     // …and the plain selector everywhere else (RPC, print).
     const detail =
       (prompt.classification
-        ? `Classification: ${prompt.classification} (confidence ${prompt.confidence?.toFixed(2)})\n`
+        ? `Classification: ${prompt.classification} (confidence ${prompt.confidence?.toFixed(2)})`
         : "") +
+      (prompt.probabilities && Object.keys(prompt.probabilities).length
+        ? ` — probabilities: ${Object.entries(prompt.probabilities)
+          .map(([k, v]) => `${k} ${v.toFixed(2)}`)
+          .join(", ")}`
+        : "") +
+      (prompt.classification ? "\n" : "") +
       `Reason: ${prompt.reason}\n` +
       `Arguments: ${prompt.argsSummary}`;
     ctx.ui.notify(`gate › ${prompt.tool}\n${detail}`, "warning");

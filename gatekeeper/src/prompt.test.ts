@@ -71,11 +71,19 @@ describe("gate prompt component", () => {
     component.handleInput?.("x");
     component.handleInput?.("\x1b[A"); // arrow key
     component.handleInput?.("s"); // no longer an option
-    component.handleInput?.("a"); // no longer an option
+    component.handleInput?.("y"); // no longer an option
     expect(outcomes).toEqual([]);
-    component.handleInput?.("y");
+    component.handleInput?.("a");
     component.handleInput?.("n"); // settled already
     expect(outcomes).toEqual(["allow"]);
+  });
+
+  it("shows the model's probability distribution alongside the classification", () => {
+    const text = render({ ...info, probabilities: { safe: 0.8, unsafe: 0.15, unsure: 0.05 } }).join("\n");
+    expect(text).toContain("Probabilities: safe 0.80 · unsafe 0.15 · unsure 0.05");
+    // no probabilities (or empty) — no line
+    expect(render(info).join("\n")).not.toContain("Probabilities:");
+    expect(render({ ...info, probabilities: {} }).join("\n")).not.toContain("Probabilities:");
   });
 
   it("esc denies and n denies", () => {

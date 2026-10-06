@@ -44,7 +44,7 @@ Gatekeeper: a pi plugin that gates every tool call through deterministic layers 
 32. As an operator, I want to configure the model endpoint — local Ollama `clef-flash` by default; remote clef, remote Jev, or any compatible service — so that I choose where classification runs.
 33. As an operator, I want remote endpoints to make their egress explicit, so that sending call data off-machine is a conscious choice.
 34. As an operator, I want model failure or timeout to route to me (or fail-block in headless mode), so that the gate never silently opens.
-35. As an operator, I want the operator prompt to show classification, confidence, tool, argument summary, and the model's reason, so that I can decide quickly and correctly.
+35. As an operator, I want the operator prompt to show classification, confidence, the model's probability distribution, tool, argument summary, and the model's reason, so that I can decide quickly and correctly.
 36. As an operator, I want to edit the policy text, so that "what counts as unsafe" fits my environment.
 37. As an operator, I want status and session statistics via slash command, so that I can see the gate's posture and activity at a glance.
 38. As an operator, I want secrets status, forced update, and a detection test via slash command, so that I can audit and refresh the secrets engine in-band.

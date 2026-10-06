@@ -193,8 +193,8 @@ describe("gatekeeper extension", () => {
     const lines = component.render(80) as string[];
     expect(lines[0].startsWith("╭")).toBe(true);
     expect(lines[lines.length - 1].endsWith("╯")).toBe(true);
-    // pressing y settles the dialog; nothing persists (ADR-0005)
-    component.handleInput("y");
+    // pressing a settles the dialog; nothing persists (ADR-0005)
+    component.handleInput("a");
     const result = await pending;
     expect(result).toBeUndefined();
     expect(env.ui.selected).toHaveLength(0); // the selector was not used
