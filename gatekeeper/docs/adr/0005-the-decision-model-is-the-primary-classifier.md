@@ -18,3 +18,12 @@ The original concept was: the model classifies every tool call, confident classi
 - `protectedPaths` (deny-rule patterns plus the gate dirs) still ride in the state, so obfuscated spellings the deterministic layers miss are judged with that knowledge.
 - The accepted vulnerability, named: a confident-but-wrong `safe` now auto-allows any tool, including `bash` and `write`. This is a deliberate tradeoff — the operator judged fatigue the likelier and more dangerous failure — and its containment is the deterministic layers ahead of the model plus the threshold, not ask floors.
 - Residual: a steered model is more dangerous as the primary classifier than as a fallback; that danger is the reason self-protection (ADR-0003) is code-level and overridable by no rule, and secrets detection (ADR-0004) is deterministic.
+
+## Amendment
+
+The decision matrix has since been tuned, with the operator's approval:
+
+- The default threshold dropped from 0.85 to 0.65, and auto-allow now additionally requires the model's reported `unsafe` probability to sit at or below a fixed 0.1 bound — a constant, not a knob, same reasoning as the 100-character argument view (ADR-0002); a missing `probabilities` counts as unmet, fail-closed to ask. A confident `safe` with non-negligible unsafe mass now asks instead of auto-allowing, narrowing the accepted silent false-allow.
+- The lower threshold also lowers the auto-block bar: an `unsafe` at 0.65 confidence now auto-blocks where it previously asked — fail-closed, but more blocking.
+
+The containment story is otherwise unchanged: deterministic layers ahead of the model, plus the threshold and the probability bound. Ask floors and the session cache remain removed.

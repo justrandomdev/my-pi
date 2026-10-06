@@ -205,6 +205,41 @@ describe("the gate", () => {
     expect(notified[0]).toContain("allow");
   });
 
+  it("auto-allow requires a negligible unsafe probability: a safe above threshold with unsafe 0.15 asks", async () => {
+    const { deps, asked } = makeDeps({
+      classify: async () => ({ choice: "safe", probabilities: { safe: 0.8, unsafe: 0.15, unsure: 0.05 }, confidence: 0.8 }),
+      askOperator: async () => "deny",
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(asked[0].reason).toContain("unsafe probability 0.15 above the auto-allow bound 0.1");
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("operator");
+  });
+
+  it("the bound is inclusive: a safe with unsafe probability exactly 0.1 auto-allows", async () => {
+    const { deps, asked } = makeDeps({
+      classify: async () => ({ choice: "safe", probabilities: { safe: 0.9, unsafe: 0.1, unsure: 0.0 }, confidence: 0.9 }),
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(decision.action).toBe("allow");
+    expect(decision.source).toBe("model");
+    expect(asked).toHaveLength(0);
+  });
+
+  it("an answer without probabilities never auto-allows (fail-closed to the operator)", async () => {
+    const { deps, asked } = makeDeps({
+      classify: async () => ({ choice: "safe", probabilities: {}, confidence: 0.99 }),
+      askOperator: async () => "deny",
+    });
+    const gate = createGate(deps);
+    const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+    expect(asked[0].reason).toContain("unsafe probability 1.00 above the auto-allow bound 0.1");
+    expect(decision.action).toBe("block");
+    expect(decision.source).toBe("operator");
+  });
+
   it("an unsafe classification at or above threshold auto-blocks", async () => {
     const { deps } = makeDeps({ classify: async () => classifyResult("unsafe", 0.97) });
     const gate = createGate(deps);

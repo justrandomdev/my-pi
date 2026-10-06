@@ -3,7 +3,7 @@ import { DEFAULT_CONFIG, resolveConfig } from "./config.js";
 
 describe("config resolution", () => {
   it("defaults to the documented posture", () => {
-    expect(DEFAULT_CONFIG.threshold).toBe(0.85);
+    expect(DEFAULT_CONFIG.threshold).toBe(0.65);
     expect(DEFAULT_CONFIG.rules).toEqual([{ action: "allow", tools: ["ls", "find"] }]);
     expect(DEFAULT_CONFIG.secrets).toEqual({
       enabled: true,

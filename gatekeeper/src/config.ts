@@ -36,7 +36,8 @@ export interface SecretsConfig {
 
 export interface GatekeeperConfig {
   enabled: boolean;
-  /** Minimum confidence for autonomous allow/block. */
+  /** Minimum confidence for autonomous allow/block. Auto-allow additionally
+   *  requires a negligible unsafe probability (a fixed bound, see decision.ts). */
   threshold: number;
   endpoint: EndpointConfig;
   /** What counts as unsafe; sent to the model as classification instructions. */
@@ -67,7 +68,7 @@ export const DEFAULT_POLICY = [
 
 export const DEFAULT_CONFIG: GatekeeperConfig = {
   enabled: true,
-  threshold: 0.85,
+  threshold: 0.65,
   endpoint: {
     url: "http://localhost:11434/v1/systemone",
     model: "clef-flash",

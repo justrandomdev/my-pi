@@ -19,7 +19,7 @@ Configuration is done two ways: **slash commands** (operator-run — type them y
   - `/gate:rules rm u2` removes user rule #2 as listed; `rm p1` removes a project rule
   - `/gate:rules test bash '{"command":"ls /tmp"}'` shows which rule a sample call hits
 - `/gate:config` — show effective config, or set keys:
-  - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block (the model is the primary classifier; confident calls act without asking)
+  - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block (auto-allow also requires the model's unsafe probability ≤ 0.1, a fixed bound)
   - `endpoint.model`, `endpoint.url` (full request URL), `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
   - `secrets.enabled`, `secrets.autoUpdate`, `secrets.source` — the deterministic secrets engine
   - `log.level`, `log.maxLines`, `log.keepFiles`, `log.retentionDays` — decision-log behavior
@@ -37,4 +37,4 @@ Note: `endpoint.apiKey` must be set by manual edit — the `set` command echoes 
 
 Full schema with defaults and rule-matching semantics: the package README (`gatekeeper/README.md`), sections "Manual configuration" and "Rules".
 
-When the user asks why a call was gated: the transparency line in the session and `/gate:log` give the classification, confidence, and the reason (ask floor, below-threshold, deny rule, or model failure) — walk them through it.
+When the user asks why a call was gated: the transparency line in the session and `/gate:log` give the classification, confidence, and the reason (below-threshold, unsafe-probability bound, deny rule, or model failure) — walk them through it.

@@ -68,6 +68,12 @@ export interface Gate {
  *  safety property. */
 const MODEL_ARGS_CHARS = 100;
 
+/** Auto-allow requires a negligible probability of harm: the model's
+ *  `unsafe` probability must sit at or below this bound. A fixed constant,
+ *  not a knob — same reasoning as MODEL_ARGS_CHARS. An answer without
+ *  probabilities counts as unmet (fail-closed: the call asks). */
+const MAX_UNSAFE_PROBABILITY = 0.1;
+
 function cap(text: string, budget: number): string {
   return text.length <= budget ? text : `${text.slice(0, budget)}…`;
 }
@@ -98,9 +104,16 @@ export function createGate(deps: GateDeps): Gate {
         if (!skipNotify) {
           deps.notify(`gate › ${tool}: ${label} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
         }
+        // A secrets hit can put the matched text inside the first 100
+        // characters of the serialized args — exactly the view logArgs
+        // captures — so logging it verbatim would copy the secret into
+        // the decision log. The masked peek already rides in `reason`;
+        // the args column becomes a constant for secrets decisions.
+        // Other sources never carry their trigger inside the args view.
+        const loggedArgs = decision.source === "secrets" ? "<blocked: secrets>" : logArgs;
         deps.writeLog({
           tool,
-          args: logArgs,
+          args: loggedArgs,
           action: decision.action,
           source: decision.source,
           classification: decision.classification,
@@ -175,7 +188,14 @@ export function createGate(deps: GateDeps): Gate {
 
       if (!failure) {
         const c = classification!;
-        const confidentSafe = c.choice === "safe" && c.confidence >= config.threshold;
+        // Auto-allow requires negligible harm risk: confidence at or above
+        // the threshold AND an unsafe probability at or below the fixed
+        // bound — a concentrated `safe` with non-negligible unsafe mass
+        // asks. Missing probabilities count as unmet.
+        const confidentSafe =
+          c.choice === "safe" &&
+          c.confidence >= config.threshold &&
+          (c.probabilities.unsafe ?? 1) <= MAX_UNSAFE_PROBABILITY;
         const confidentUnsafe = c.choice === "unsafe" && c.confidence >= config.threshold;
 
         if (confidentUnsafe) {
@@ -194,7 +214,9 @@ export function createGate(deps: GateDeps): Gate {
         failure ??
         (classification!.choice === "unsure"
           ? `model unsure (${classification!.confidence.toFixed(2)})`
-          : `confidence ${classification!.confidence.toFixed(2)} below threshold ${config.threshold}`);
+          : classification!.confidence < config.threshold
+            ? `confidence ${classification!.confidence.toFixed(2)} below threshold ${config.threshold}`
+            : `unsafe probability ${(classification!.probabilities.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`);
 
       const outcome = await deps.askOperator({
         tool,

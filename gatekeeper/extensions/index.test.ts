@@ -510,6 +510,61 @@ describe("gatekeeper extension", () => {
     expect(logText).not.toContain("AKIAIOSFODNN7EXAMPLA");
   });
 
+  it("a secret within the first 100 chars of the serialized args does not leak into the decision log", async () => {
+    // Boundary case for the log-masking fix: the key sits at byte ~23 of
+    // the JSON — well inside the first 100 characters that the logged
+    // argument view captures. Constructed at runtime (joined halves) so
+    // this fixture doesn't trip the very engine under test when the
+    // file is written.
+    const awsKey = ["AKIA", "IOSFODNN7EXAMPLA"].join("");
+    const maskedPeek = `${awsKey.slice(0, 3)}…(20 chars)`;
+    const { captured, env } = await setup({ choice: "safe", confidence: 0.99 });
+    const result = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: "x", content: awsKey },
+    });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("aws-access-token");
+    expect(result?.reason).not.toContain(awsKey);
+    // the model was never consulted
+    expect(env.requests).toHaveLength(0);
+    // poll the log (the write is fire-and-forget)
+    const logPath = join(userHome, ".pi/agent/gate/decisions.jsonl");
+    let logText = "";
+    for (let i = 0; i < 50 && !logText; i++) {
+      try {
+        logText = await readFile(logPath, "utf8");
+      } catch {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    // the decision is logged: the masked peek rides in the reason, the
+    // args column is the constant — the key itself never lands in the log
+    expect(logText).toContain('"source":"secrets"');
+    expect(logText).toContain(maskedPeek);
+    expect(logText).toContain("<blocked: secrets>");
+    expect(logText).not.toContain(awsKey);
+    // a secret-bearing path (no content, short target) is covered too
+    const secretPath = ["/keys/", awsKey, ".json"].join("");
+    const second = await runToolCall(captured, env, {
+      type: "tool_call",
+      toolName: "read",
+      input: { path: secretPath },
+    });
+    expect(second?.block).toBe(true);
+    let logText2 = logText;
+    for (let i = 0; i < 50 && logText2 === logText; i++) {
+      try {
+        logText2 = await readFile(logPath, "utf8");
+      } catch {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    expect(logText2.trim().split("\n")).toHaveLength(2);
+    expect(logText2).not.toContain(awsKey);
+  });
+
   it("secrets.enabled false turns detection off (the single switch, ADR-0005)", async () => {
     await writeFile(
       join(userHome, ".pi/agent/gate/config.json"),

@@ -11,7 +11,7 @@ Every tool call passes through the gate, in order:
 1. **Self-protection** — calls touching the gate's own config, log, or secrets definitions are always denied, `realpath`-resolved so symlink chains are caught too. Not overridable by any rule. See [ADR-0003](docs/adr/0003-the-gate-protects-itself.md).
 2. **Secrets detection** — the gitleaks corpus (~220 rules, compiled to a JS regex subset) scans the full command and file contents. A hit blocks before every rule and the model, masked (`sk-…(51 chars)`), overridable only by your `secrets.toml`. See [ADR-0004](docs/adr/0004-deterministic-secret-detection.md).
 3. **Rules** — ordered allow/deny entries (project rules first, then user, then shipped defaults). First hit wins; a fast-path, not a guard.
-4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator.
+4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator.
 5. **The operator** — a bordered prompt (classification colored green/red/yellow) with `y: allow · n/esc: deny`. Nothing persists from a prompt; persistent allows are explicit rules.
 
 Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`failMode: block`, for headless use).
@@ -45,7 +45,7 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 ```json
 {
   "enabled": true,
-  "threshold": 0.85,
+  "threshold": 0.65,
   "endpoint": {
     "url": "http://localhost:11434/v1/systemone",
     "model": "clef-flash",
@@ -75,7 +75,7 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | `false` passes everything through ungated — except self-protection, which applies whenever the gate is loaded. |
-| `threshold` | `0.85` | Minimum confidence for autonomous allow/block. Below it: operator. |
+| `threshold` | `0.65` | Minimum confidence for autonomous allow/block. Auto-allow additionally requires the model's unsafe probability ≤ 0.1 (a fixed bound, not configurable). Below either: operator. |
 | `endpoint.url` | `http://localhost:11434/v1/systemone` | Full request URL of a Jev/System One-compatible service — the gate POSTs here verbatim. |
 | `endpoint.model` | `clef-flash` | Any model the endpoint serves (`clef`, a remote Jev, …). |
 | `endpoint.apiKey` | — | Bearer token for remote services. Set this by manual edit only — the `set` command echoes values into notifications. |
@@ -141,7 +141,7 @@ The scan covers the full `bash`/`powershell` command and the full serialized arg
 
 ### The decision log
 
-`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. Full file contents never reach the model state (ADR-0002) or this log — but a short secret inside the first 100 characters of a command is an argument, and does land here.
+`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length; a secrets block logs a constant in the args column — a detected secret never lands in this log), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. Full file contents never reach the model state (ADR-0002) or this log — but a short secret the corpus misses, inside the first 100 characters of a command, is an argument and does land here.
 
 ## Slash commands
 

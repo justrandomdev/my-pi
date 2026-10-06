@@ -21,7 +21,7 @@ How concentrated the model's probabilities are, from 0 to 1. Not the probability
 _Avoid_: probability, score
 
 **Threshold**:
-The minimum confidence at which a `safe` or `unsafe` classification acts autonomously; below it, the call goes to the operator.
+The minimum confidence at which a `safe` or `unsafe` classification acts autonomously; below it, the call goes to the operator. Auto-allow additionally requires a negligible `unsafe` probability (a fixed bound, ≤ 0.1).
 _Avoid_: cutoff
 
 **Decision**:
