@@ -73,8 +73,8 @@ function buildRequestBody(endpoint: ClassifierEndpoint, input: ClassifyInput) {
         // only where it cannot mislead; per the decision matrix a tied or
         // low-confidence safe still routes to the operator.
         criteria: {
-          safe: "Read-only inspection, diagnostic queries, data transformations, and non-mutating workflows. Syntactic complexity (e.g., chained shell commands, subshells, regex) is fully SAFE as long as the net behavior only reads, parses, or formats data without altering external state or leaking secrets.",
-          unsafe: "State-altering actions (write, overwrite, delete, move), privilege escalation, credential harvesting, network data egress, or execution of destructive system calls.",
+          safe: "Edits, writes and invocation of build and test tools within the current working directory(cwd). Experiments, hypothesis testing and smoke tests bounded to the /tmp folder. Read-only inspection, diagnostic queries, data transformations, and non-mutating workflows. Syntactic complexity (e.g., chained shell commands, subshells, regex) is fully SAFE as long as the net behavior only reads, parses, or formats data without altering external state or leaking secrets.",
+          unsafe: "State-altering actions (write, overwrite, delete, move) outside the current working directory(cwd), privilege escalation, credential harvesting, network data egress, or execution of destructive system calls.",
           unsure: "Opaque or obfuscated payloads (e.g., base64 payloads executed inline, dynamic downloads executed directly), incomplete commands, or actions where critical execution parameters are completely hidden.",
         },
       },

@@ -205,21 +205,21 @@ describe("the gate", () => {
     expect(notified[0]).toContain("allow");
   });
 
-  it("auto-allow requires a negligible unsafe probability: a safe above threshold with unsafe 0.15 asks", async () => {
+  it("auto-allow requires a negligible unsafe probability: a safe above threshold with unsafe 0.2 asks", async () => {
     const { deps, asked } = makeDeps({
-      classify: async () => ({ choice: "safe", probabilities: { safe: 0.8, unsafe: 0.15, unsure: 0.05 }, confidence: 0.8 }),
+      classify: async () => ({ choice: "safe", probabilities: { safe: 0.8, unsafe: 0.2, unsure: 0.0 }, confidence: 0.8 }),
       askOperator: async () => "deny",
     });
     const gate = createGate(deps);
     const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
-    expect(asked[0].reason).toContain("unsafe probability 0.15 above the auto-allow bound 0.1");
+    expect(asked[0].reason).toContain("unsafe probability 0.20 above the auto-allow bound 0.15");
     expect(decision.action).toBe("block");
     expect(decision.source).toBe("operator");
   });
 
-  it("the bound is inclusive: a safe with unsafe probability exactly 0.1 auto-allows", async () => {
+  it("the bound is inclusive: a safe with unsafe probability exactly 0.15 auto-allows", async () => {
     const { deps, asked } = makeDeps({
-      classify: async () => ({ choice: "safe", probabilities: { safe: 0.9, unsafe: 0.1, unsure: 0.0 }, confidence: 0.9 }),
+      classify: async () => ({ choice: "safe", probabilities: { safe: 0.85, unsafe: 0.15, unsure: 0.0 }, confidence: 0.9 }),
     });
     const gate = createGate(deps);
     const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
@@ -302,12 +302,12 @@ describe("the gate", () => {
       const { deps, asked } = juryDeps(async (_input, endpoint) =>
         endpoint.name === "hermes"
           ? classifyResult("safe", 0.9)
-          : { choice: "safe", probabilities: { safe: 0.8, unsafe: 0.15, unsure: 0.05 }, confidence: 0.8 },
+          : { choice: "safe", probabilities: { safe: 0.75, unsafe: 0.25, unsure: 0.0 }, confidence: 0.8 },
       { askOperator: async () => "deny" });
       const gate = createGate(deps);
       const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
       expect(asked[0].jury).toHaveLength(2);
-      expect(asked[0].reason).toContain("minerva: unsafe probability 0.15 above the auto-allow bound 0.1");
+      expect(asked[0].reason).toContain("minerva: unsafe probability 0.25 above the auto-allow bound 0.15");
       expect(decision.action).toBe("block");
     });
 

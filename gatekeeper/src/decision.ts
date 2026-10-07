@@ -101,7 +101,7 @@ const MODEL_ARGS_CHARS = 100;
  *  `unsafe` probability must sit at or below this bound. A fixed constant,
  *  not a knob — same reasoning as MODEL_ARGS_CHARS. An answer without
  *  probabilities counts as unmet (fail-closed: the call asks). */
-const MAX_UNSAFE_PROBABILITY = 0.1;
+const MAX_UNSAFE_PROBABILITY = 0.15;
 
 function cap(text: string, budget: number): string {
   return text.length <= budget ? text : `${text.slice(0, budget)}…`;
@@ -177,10 +177,10 @@ export function createGate(deps: GateDeps): Gate {
             ? mode === "jury" && decision.jury?.length
               ? "[jury] "
               : mode === "fallback" && decision.jury?.length
-              ? "[fallback] "
-              : mode === "modelSelect" && decision.endpoint
-              ? "[modelSelect] "
-              : ""
+                ? "[fallback] "
+                : mode === "modelSelect" && decision.endpoint
+                  ? "[modelSelect] "
+                  : ""
             : "";
           const servingName = tag === "[modelSelect] " ? ` ${decision.endpoint}` : "";
           deps.notify(

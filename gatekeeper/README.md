@@ -56,10 +56,10 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
   "policy": "…what counts as unsafe…",
   "failMode": "ask",
   "multiEndpointMode": "modelSelect",
-  "selectedEndpoint": "hermes",
+  "selectedEndpoint": "clef-flash",
   "stateBudgetChars": 4000,
   "endpoints": [
-    { "name": "hermes", "url": "http://localhost:11434/v1/systemone", "model": "clef-flash", "timeoutMs": 30000, "keepAlive": "10m" },
+    { "name": "clef-flash", "url": "http://localhost:11434/v1/systemone", "model": "clef-flash", "timeoutMs": 30000, "keepAlive": "10m" },
     { "url": "https://jev.example.com/v1/systemone", "model": "clef-24b", "apiKey": "…" }
   ],
   "log": {
@@ -197,7 +197,7 @@ The auto-update runs in the background on start and reports only on change or fa
 /gate:config set endpoint.model clef            dotted endpoint keys
 /gate:config set endpoint.url https://…
 /gate:config set endpoint.timeoutMs 60000
-/gate:config set endpoints.hermes.url https://…  set a field on a jury member (addressed by resolved name)
+/gate:config set endpoints.clef-flash.url https://…  set a field on a jury member (addressed by resolved name)
 /gate:config set multiEndpointMode jury          jury / fallback / modelSelect (ADR-0007)
 /gate:config set selectedEndpoint clef           same as /gate model clef
 /gate:config test bash '{"command":"ls /tmp"}'   fan the sample call out to every endpoint, list verdicts — comparison regardless of mode
