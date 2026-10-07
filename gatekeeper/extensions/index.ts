@@ -13,6 +13,7 @@ import { createSystemOneClassifier, type ClassifyInput } from "../src/classifier
 import { createGate, type GateDeps, type OperatorPromptInfo } from "../src/decision.js";
 import { DecisionLog } from "../src/log.js";
 import { createGatePrompt, type GatePromptResult } from "../src/prompt.js";
+import { GateLogView } from "./log-view.js";
 import { argsText, gateDirs, matchRules, protectedPatterns, type Rule } from "../src/rules.js";
 import { compileSecrets, compileUserSecrets, scanSecrets, type CompiledSecrets, type SecretsHit, type SecretsOverride } from "../src/secrets.js";
 
@@ -847,6 +848,13 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       const filter = parts[0] && /^\d+$/.test(parts[0]) ? parts[1] : parts[0];
       const records = await logger(ctx.cwd).tail(n * 4);
       const selected = records.filter((r) => !filter || r.tool.includes(filter)).slice(-n);
+      if (ctx.mode === "tui" && typeof ctx.ui.custom === "function" && selected.length) {
+        await ctx.ui.custom<void>(
+          (tui, theme, _kb, done) => new GateLogView(tui, theme, selected, done, { n, filter }),
+          { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "90%" } },
+        );
+        return;
+      }
       const lines = selected.map(
         (r) => `${r.ts} ${r.tool} → ${r.action} (${r.source}${r.classification ? ` ${r.classification} ${r.confidence?.toFixed(2)}` : ""})`,
       );

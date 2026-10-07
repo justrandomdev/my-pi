@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createGatekeeper } from "./index.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 const HOME = "/home/op";
 const bundledSnapshot = join(dirname(fileURLToPath(import.meta.url)), "../gitleaks.toml");
@@ -982,5 +983,118 @@ describe("gatekeeper extension", () => {
     // trusted: they surface
     await handler("", env.ctx({ isProjectTrusted: () => true }));
     expect(env.ui.notified.some((n) => n.includes("project-only-rule"))).toBe(true);
+  });
+
+  it("gate:log in non-TUI modes keeps the one-line rendering", async () => {
+    const { captured, env } = await setup({ choice: "unsafe", confidence: 0.97 });
+    await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/etc/passwd" } });
+    const handler = captured.commands.get("gate:log")!.handler;
+    await handler("5", env.ctx({ mode: "rpc" }));
+    const line = env.ui.notified.find((n) => n.includes("gate › last"));
+    expect(line).toContain("read → block (model unsafe 0.97)");
+  });
+
+  describe("gate:log overlay (tui)", () => {
+    /** Captures the overlay factory and hands back a renderable view. */
+    function captureOverlay() {
+      let factory: ((tui: any, theme: any, kb: any, done: () => void) => any) | undefined;
+      const closed = { value: false };
+      const fakeTheme = {
+        fg: (_c: string, s: string) => s,
+        bg: (_c: string, s: string) => s,
+        bold: (s: string) => s,
+      };
+      return {
+        fakeTheme,
+        install: (ui: any) => {
+          ui.custom = async (f: any) => {
+            factory = f;
+            return undefined;
+          };
+        },
+        build: (rows = 30) => {
+          expect(factory).toBeDefined();
+          const tui = { terminal: { rows, columns: 110 }, requestRender() {} };
+          return factory!(tui, fakeTheme, {} as any, () => (closed.value = true));
+        },
+        closed,
+      };
+    }
+
+    it("opens a table overlay with the full decision context", async () => {
+      const { captured, env } = await setup({ choice: "unsafe", confidence: 0.97 });
+      await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/etc/passwd" } });
+      const overlay = captureOverlay();
+      overlay.install(env.ui);
+      await captured.commands.get("gate:log")!.handler("", env.ctx());
+
+      const view = overlay.build();
+      const all = view.render(100).join("\n");
+      // the columns the operator reviews
+      expect(all).toMatch(/time\s+tool\s+action\s+source\s+class\s+model\s+args\s+reason/);
+      expect(all).toContain("read");
+      expect(all).toContain("block");
+      expect(all).toContain('"path":"/etc/passwd"');
+      // no overlay for an empty selection — the fallback message instead
+      const empty = captureOverlay();
+      empty.install(env.ui);
+      await captured.commands.get("gate:log")!.handler("zzz", env.ctx());
+      expect(env.ui.notified.some((n) => n.includes("(none yet)"))).toBe(true);
+    });
+
+    it("Enter expands the selected record, Esc returns, Esc/q closes", async () => {
+      const { captured, env } = await setup({ choice: "unsafe", confidence: 0.97 });
+      await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/etc/passwd" } });
+      const overlay = captureOverlay();
+      overlay.install(env.ui);
+      await captured.commands.get("gate:log")!.handler("", env.ctx());
+      const view = overlay.build();
+
+      view.handleInput("\r"); // Enter → detail
+      const detail = view.render(100).join("\n");
+      expect(detail).toContain("time: ");
+      expect(detail).toContain("probabilities: ");
+      expect(detail).toContain("reason: ");
+      expect(detail).toContain("args: ");
+
+      view.handleInput("\x1b"); // Esc → back to the table
+      expect(view.render(100).join("\n")).toMatch(/time\s+tool\s+action\s+source\s+class\s+model\s+args\s+reason/);
+
+      view.handleInput("q");
+      expect(overlay.closed.value).toBe(true);
+    });
+
+    it("every boxed line is the same width at any terminal size", async () => {
+      const { captured, env } = await setup({ choice: "unsafe", confidence: 0.97 });
+      await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/etc/passwd" } });
+      for (const width of [100, 60, 40]) {
+        const overlay = captureOverlay();
+        overlay.install(env.ui);
+        await captured.commands.get("gate:log")!.handler("", env.ctx());
+        const lines = overlay.build(30).render(width);
+        const expected = Math.max(24, width - 1);
+        expect(new Set(lines.map((l: string) => visibleWidth(l)))).toEqual(new Set([expected]));
+        expect(lines[0]!.startsWith("┌")).toBe(true);
+        expect(lines[lines.length - 1]!.startsWith("└")).toBe(true);
+      }
+    });
+
+    it("an over-page detail keeps the frame: bottom border survives clipping", async () => {
+      const { captured, env } = await setup({ choice: "unsafe", confidence: 0.97 });
+      await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/etc/passwd" } });
+      const overlay = captureOverlay();
+      overlay.install(env.ui);
+      await captured.commands.get("gate:log")!.handler("", env.ctx());
+      // 10 rows → 9-line maxHeight; the record's detail fills more, forcing
+      // the scroll-marker path that used to overflow the budget
+      const view = overlay.build(10);
+      view.handleInput("\r"); // Enter → detail (over a page long)
+      const lines = view.render(100);
+      expect(lines).toHaveLength(9); // floor(10 * 0.9) — never more
+      expect(lines[0]).toContain("┌");
+      expect(lines[lines.length - 1]).toContain("└");
+      expect(lines[lines.length - 1]).toContain("Enter/Esc back");
+      expect(lines.join("\n")).toContain("time: ");
+    });
   });
 });
