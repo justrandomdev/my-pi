@@ -8,7 +8,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { configPaths, DEFAULT_CONFIG, resolveConfig, resolveEndpoints, type DeepPartial, type EndpointConfig, type GatekeeperConfig, type NamedEndpoint, type ScopedConfig } from "../src/config.js";
+import { configPaths, DEFAULT_CONFIG, MULTI_ENDPOINT_MODES, resolveConfig, resolveEndpoints, resolveMode, selectEndpoint, type DeepPartial, type EndpointConfig, type GatekeeperConfig, type NamedEndpoint, type ScopedConfig } from "../src/config.js";
 import { createSystemOneClassifier, type ClassifyInput } from "../src/classifier.js";
 import { createGate, type GateDeps, type OperatorPromptInfo } from "../src/decision.js";
 import { DecisionLog } from "../src/log.js";
@@ -53,6 +53,8 @@ const CONFIG_KEYS: Record<string, (value: unknown) => string | undefined> = {
   threshold: isPortion,
   policy: isNonEmptyString,
   failMode: isOneOf("ask", "block"),
+  multiEndpointMode: isOneOf(...MULTI_ENDPOINT_MODES),
+  selectedEndpoint: isNonEmptyString,
   notify: isOneOf("always", "summary", "off", "debug"),
   stateBudgetChars: isPositiveInt,
   "secrets.enabled": isBoolean,
@@ -126,6 +128,21 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
 
   function logDir(cwd: string): string {
     return effective.log.level === "project" ? join(cwd, ".pi/gate") : join(home, ".pi/agent/gate");
+  }
+
+  /** The /gate status mode line (ADR-0007): the act and its effective
+   *  selection. An invalid hand-edited mode is reported here too — the
+   *  operator sees the posture is unreadable, never silently defaulted. */
+  function modeLine(config: GatekeeperConfig, endpoints: NamedEndpoint[]): string {
+    try {
+      const mode = resolveMode(config);
+      if (mode === "jury") return `jury › ${endpoints.length} endpoints`;
+      if (mode === "fallback") return "fallback › first-hit";
+      const { endpoint, warning } = selectEndpoint(endpoints, config);
+      return `modelSelect › ${endpoint.name}${warning ? ` (selected "${config.selectedEndpoint}" not found)` : ""}`;
+    } catch (error) {
+      return (error as Error).message;
+    }
   }
 
   let cachedLogger: { key: string; logger: DecisionLog } | undefined;
@@ -492,9 +509,45 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
   });
 
   pi.registerCommand("gate", {
-    description: "Gatekeeper status: posture, endpoint, secrets, session stats",
-    handler: async (_args: string, ctx: AnyCtx) => {
+    description: "Gatekeeper status, or `model [name]` to select the endpoint modelSelect serves",
+    handler: async (args: string, ctx: AnyCtx) => {
       await refreshConfig(ctx);
+      const { level, parts } = parseCmdArgs(args);
+
+      if (parts[0] === "model") {
+        let endpoints: NamedEndpoint[];
+        try {
+          endpoints = resolveEndpoints(effective);
+        } catch (error) {
+          ctx.ui.notify(`gate › ${(error as Error).message}`, "error");
+          return;
+        }
+        const name = parts[1];
+        if (!name) {
+          // List the candidates and who is serving, without changing anything.
+          const { endpoint } = selectEndpoint(endpoints, effective);
+          ctx.ui.notify([
+            "gate › endpoints:",
+            ...endpoints.map((e) => `  ${e.name} @ ${e.url}`),
+            `serving: ${endpoint.name}`,
+          ].join("\n"), "info");
+          return;
+        }
+        const selected = endpoints.find((e) => e.name === name);
+        if (!selected) {
+          ctx.ui.notify(
+            `gate › no endpoint named "${name}" (endpoints: ${endpoints.map((e) => e.name).join(", ")})`,
+            "warning",
+          );
+          return;
+        }
+        await writeScoped(level, (scoped) => {
+          scoped.selectedEndpoint = name;
+        }, ctx.cwd, ctx);
+        ctx.ui.notify(`gate › selected endpoint ${name} at ${level} level`, "info");
+        return;
+      }
+
       const secretsLine = snapshotRules
         ? `${snapshotRules.rules.length}/${snapshotRules.total} gitleaks rules active (${snapshotRules.skipped} skipped) + ${userPart.rules.length} user, last update: ${secretsLastUpdate}`
         : "unavailable";
@@ -508,6 +561,9 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       const lines = [
         `Gatekeeper ${effective.enabled ? "enabled" : "disabled"}`,
         `Endpoints: ${endpoints.map((e) => `${e.name} @ ${e.url}`).join(", ")}`,
+        // The multi-endpoint act (ADR-0007) — only meaningful with an
+        // `endpoints` array; a single-endpoint config has no mode line.
+        ...(effective.endpoints?.length ? [`Mode: ${modeLine(effective, endpoints)}`] : []),
         `Threshold: ${effective.threshold} | Fail mode: ${effective.failMode}`,
         `Secrets: ${effective.secrets.enabled ? secretsLine : "off"}`,
         `Rules: ${effective.rules.length} (incl. shipped defaults) | Log: ${logDir(ctx.cwd)}`,
@@ -701,7 +757,9 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
             const entry = (s.endpoints ?? []).find(
               (e) => (e.name ?? (e as EndpointConfig).model) === entryName,
             );
-            if (entry) (entry as Record<string, unknown>)[field] = parsed;
+            // writing one whitelisted field of an entry; the field name is
+            // validated against the regex above
+            if (entry) (entry as unknown as Record<string, unknown>)[field] = parsed;
           }, ctx.cwd, ctx);
           const echo = field === "apiKey" ? "***" : value;
           ctx.ui.notify(`gate › set ${key} = ${echo} at ${level} level`, "info");
@@ -720,6 +778,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           ) return Number(value);
           if (
             key === "policy" || key === "failMode" || key === "log.level" ||
+            key === "multiEndpointMode" || key === "selectedEndpoint" ||
             key.startsWith("endpoint.")
           ) return value;
           return Number.isNaN(Number(value)) ? value : Number(value);
@@ -769,6 +828,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
             ? effective.endpoints.map((e, i) => `endpoint ${i + 1}: ${e.name ?? e.model} @ ${e.url} (${e.model})`)
             : [`endpoint: ${effective.endpoint.url} (${effective.endpoint.model})`]),
           `failMode: ${effective.failMode} | notify: ${effective.notify}`,
+          `multiEndpointMode: ${effective.multiEndpointMode ?? "modelSelect (default)"} | selectedEndpoint: ${effective.selectedEndpoint ?? "(none — first entry)"}`,
           `secrets: ${effective.secrets.enabled ? "enabled" : "off"} | autoUpdate: ${effective.secrets.autoUpdate}`,
           `log: level=${effective.log.level} maxLines=${effective.log.maxLines} keepFiles=${effective.log.keepFiles} retentionDays=${effective.log.retentionDays}`,
           `secrets source: ${effective.secrets.source}`,

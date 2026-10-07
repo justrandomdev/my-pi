@@ -1,0 +1,8 @@
+{
+  "endpoint": {
+    "model": "clef",
+    "apiKey": "cfat_g8pbHB8bVopHlO6wMy96Nau4rLy5U0ZYD0Q5aln975ee4145",
+    "url": "https://api.cloudflare.com/client/v4/accounts/4d987d1447eed46b1afa14c9b441601e/ai/run/@cf/cloudflare/clef",
+    "keepAlive": ""
+  }
+}

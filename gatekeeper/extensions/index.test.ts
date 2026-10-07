@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -232,7 +232,7 @@ describe("gatekeeper extension", () => {
     async function jurySetup(endpoints: unknown[]) {
       await writeFile(
         join(userHome, ".pi/agent/gate/config.json"),
-        JSON.stringify({ secrets: { autoUpdate: false }, endpoints }),
+        JSON.stringify({ secrets: { autoUpdate: false }, multiEndpointMode: "jury", endpoints }),
       );
     }
 
@@ -288,6 +288,87 @@ describe("gatekeeper extension", () => {
       const line = env.ui.notified.find((n) => n.includes("jury test for bash"));
       expect(line).toContain("hermes: safe 0.90");
       expect(line).toContain("minerva: unsafe 0.40");
+    });
+  });
+
+  describe("multi-endpoint modes (ADR-0007)", () => {
+    const twoEndpoints = [
+      { name: "hermes", url: "http://a.example/v1/systemone", model: "m1", timeoutMs: 5000, keepAlive: "" },
+      { name: "minerva", url: "http://b.example/v1/systemone", model: "m2", timeoutMs: 5000, keepAlive: "" },
+    ];
+
+    // The gate hot-reloads on mtime change; two writes can land in the
+    // same clock tick, so each write stamps a distinct mtime explicitly.
+    let tick = Date.now();
+    async function writeConfig(patch: Record<string, unknown>) {
+      await writeFile(
+        join(userHome, ".pi/agent/gate/config.json"),
+        JSON.stringify({ secrets: { autoUpdate: false }, ...patch }),
+      );
+      const when = new Date(++tick);
+      await utimes(join(userHome, ".pi/agent/gate/config.json"), when, when);
+    }
+
+    it("with an endpoints array and no mode, only the first endpoint runs (the deliberate break)", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      await createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+      await writeConfig({ endpoints: twoEndpoints });
+      const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
+      expect(result).toBeUndefined(); // allowed
+      expect(env.requests).toHaveLength(1); // hermes alone — minerva never ran
+    });
+
+    it("gate:config set validates multiEndpointMode and selectedEndpoint", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+      const handler = captured.commands.get("gate:config")!.handler;
+      await handler("set multiEndpointMode jury", env.ctx());
+      await handler("set multiEndpointMode juryy", env.ctx()); // rejected, never written
+      await handler("set selectedEndpoint hermes", env.ctx());
+      const cfg = JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8"));
+      expect(cfg.multiEndpointMode).toBe("jury");
+      expect(cfg.selectedEndpoint).toBe("hermes");
+      expect(env.ui.notified.some((n) => n.includes('must be one of "jury", "fallback", "modelSelect"'))).toBe(true);
+    });
+
+    it("/gate model <name> selects and persists; an unknown name warns; /gate model lists", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+      await writeConfig({ multiEndpointMode: "modelSelect", endpoints: twoEndpoints });
+      const handler = captured.commands.get("gate")!.handler;
+
+      await handler("model minerva", env.ctx());
+      expect(JSON.parse(await readFile(join(userHome, ".pi/agent/gate/config.json"), "utf8")).selectedEndpoint)
+        .toBe("minerva");
+
+      await handler("model ghost", env.ctx());
+      expect(env.ui.notified.some((n) => n.includes('no endpoint named "ghost"'))).toBe(true);
+
+      await handler("model", env.ctx());
+      const listing = env.ui.notified.find((n) => n.includes("serving: minerva"));
+      expect(listing).toContain("hermes @ http://a.example/v1/systemone");
+      expect(listing).toContain("minerva @ http://b.example/v1/systemone");
+    });
+
+    it("/gate status shows the mode line only for multi-endpoint configs", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      createGatekeeper(pi, { home: userHome, fetchFn: env.fetchFn });
+      const handler = captured.commands.get("gate")!.handler;
+
+      await handler("model minerva", env.ctx());
+      expect(env.ui.notified.some((n) => n.includes("Mode: "))).toBe(false); // single endpoint: no mode
+
+      await writeConfig({ multiEndpointMode: "fallback", endpoints: twoEndpoints });
+      await handler("", env.ctx());
+      expect(env.ui.notified.some((n) => n.includes("Mode: fallback › first-hit"))).toBe(true);
+
+      await writeConfig({ multiEndpointMode: "juryy", endpoints: twoEndpoints });
+      await handler("", env.ctx());
+      expect(env.ui.notified.some((n) => n.includes("Mode: invalid multiEndpointMode"))).toBe(true);
     });
   });
 

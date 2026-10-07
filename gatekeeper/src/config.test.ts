@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, resolveConfig, resolveEndpoints, type GatekeeperConfig } from "./config.js";
+import { DEFAULT_CONFIG, resolveConfig, resolveEndpoints, resolveMode, selectEndpoint, type GatekeeperConfig, type MultiEndpointMode } from "./config.js";
 
 describe("config resolution", () => {
   it("defaults to the documented posture", () => {
     expect(DEFAULT_CONFIG.threshold).toBe(0.65);
+    expect(DEFAULT_CONFIG.multiEndpointMode).toBe("modelSelect");
+    expect(DEFAULT_CONFIG.selectedEndpoint).toBeUndefined();
     expect(DEFAULT_CONFIG.rules).toEqual([{ action: "allow", tools: ["ls", "find"] }]);
     expect(DEFAULT_CONFIG.secrets).toEqual({
       enabled: true,
@@ -62,6 +64,55 @@ describe("config resolution", () => {
 
   it("defaults survive when no scoped config exists", () => {
     expect(resolveConfig({})).toEqual(DEFAULT_CONFIG);
+  });
+
+  it("the new multi-endpoint keys merge per key across levels (ADR-0001)", () => {
+    const config = resolveConfig({
+      user: { multiEndpointMode: "jury", selectedEndpoint: "hermes" },
+      project: { multiEndpointMode: "fallback" },
+    });
+    expect(config.multiEndpointMode).toBe("fallback");
+    expect(config.selectedEndpoint).toBe("hermes");
+  });
+});
+
+describe("resolveMode (ADR-0007)", () => {
+  it("defaults to modelSelect when absent", () => {
+    expect(resolveMode({ ...structuredClone(DEFAULT_CONFIG), multiEndpointMode: undefined as unknown as MultiEndpointMode })).toBe("modelSelect");
+    expect(resolveMode(DEFAULT_CONFIG)).toBe("modelSelect");
+  });
+
+  it("passes through each documented mode", () => {
+    for (const mode of ["jury", "fallback", "modelSelect"] as const) {
+      expect(resolveMode({ ...structuredClone(DEFAULT_CONFIG), multiEndpointMode: mode })).toBe(mode);
+    }
+  });
+
+  it("rejects an invalid hand-edited value loudly", () => {
+    expect(() => resolveMode({ ...structuredClone(DEFAULT_CONFIG), multiEndpointMode: "juryy" as MultiEndpointMode }))
+      .toThrow(/invalid multiEndpointMode "juryy"/);
+  });
+});
+
+describe("selectEndpoint (ADR-0007)", () => {
+  const endpoints = [
+    { name: "hermes", url: "http://a", model: "m1", timeoutMs: 1, keepAlive: "" },
+    { name: "minerva", url: "http://b", model: "m2", timeoutMs: 1, keepAlive: "" },
+  ];
+
+  it("without a selection the first entry serves", () => {
+    expect(selectEndpoint(endpoints, DEFAULT_CONFIG)).toEqual({ endpoint: endpoints[0] });
+  });
+
+  it("a selection by resolved name serves that endpoint", () => {
+    expect(selectEndpoint(endpoints, { ...DEFAULT_CONFIG, selectedEndpoint: "minerva" }).endpoint)
+      .toEqual(endpoints[1]);
+  });
+
+  it("a stale selection still serves the first entry, with a warning", () => {
+    const { endpoint, warning } = selectEndpoint(endpoints, { ...DEFAULT_CONFIG, selectedEndpoint: "ghost" });
+    expect(endpoint).toEqual(endpoints[0]);
+    expect(warning).toContain('selected endpoint "ghost" not found — serving "hermes" instead');
   });
 });
 

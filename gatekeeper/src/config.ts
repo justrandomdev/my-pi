@@ -82,10 +82,22 @@ export interface GatekeeperConfig {
    *  requires a negligible unsafe probability (a fixed bound, see decision.ts). */
   threshold: number;
   endpoint: EndpointConfig;
-  /** The endpoint jury (ADR-0006). Present and non-empty: every entry
-   *  classifies in parallel and the most pessimistic verdict wins.
-   *  Absent: the singular `endpoint` runs as a one-member jury. */
+  /** The endpoint jury (ADR-0006). Present and non-empty: the entries
+   *  act per `multiEndpointMode`. Absent: the singular `endpoint` runs
+   *  as a one-member jury. */
   endpoints?: EndpointEntry[];
+  /** How the `endpoints` entries act (ADR-0007): `jury` — every entry
+   *  classifies in parallel and the most pessimistic verdict wins
+   *  (ADR-0006, the model-evaluation rig); `fallback` — the entries are
+   *  tried in array order until one answers; `modelSelect` — only the
+   *  operator-selected endpoint runs. Absent → `modelSelect`.
+   *  Meaningless without `endpoints`. */
+  multiEndpointMode: MultiEndpointMode;
+  /** The endpoint `modelSelect` serves, by resolved name. Unset: the
+   *  first `endpoints` entry. A name that resolves to nothing serves the
+   *  first entry and warns — the gate never refuses over a stale
+   *  selection (ADR-0007). */
+  selectedEndpoint?: string;
   /** What counts as unsafe; sent to the model as classification instructions. */
   policy: string;
   /** Behavior when the model fails or times out. */
@@ -103,6 +115,41 @@ export interface GatekeeperConfig {
   secrets: SecretsConfig;
   /** Ordered; project rules come first (ADR-0001). */
   rules: Rule[];
+}
+
+export const MULTI_ENDPOINT_MODES = ["jury", "fallback", "modelSelect"] as const;
+export type MultiEndpointMode = (typeof MULTI_ENDPOINT_MODES)[number];
+
+/** The multi-endpoint act (ADR-0007). Absent → `modelSelect` — the
+ *  deliberate break from ADR-0006's implicit jury, which stays a
+ *  model-evaluation rig the operator opts into. Invalid values are an
+ *  error — fail loudly, never silently misread the posture. */
+export function resolveMode(config: GatekeeperConfig): MultiEndpointMode {
+  const value = config.multiEndpointMode ?? "modelSelect";
+  if (!(MULTI_ENDPOINT_MODES as readonly string[]).includes(value)) {
+    throw new Error(
+      `invalid multiEndpointMode "${value}" — must be one of ${MULTI_ENDPOINT_MODES.join(", ")}`,
+    );
+  }
+  return value;
+}
+
+/** The endpoint `modelSelect` serves (ADR-0007): the operator's
+ *  `selectedEndpoint` when it resolves, else the first entry. A stale
+ *  name still serves the first entry — the gate never refuses to run —
+ *  but the substitution is announced in the returned warning. */
+export function selectEndpoint(
+  endpoints: NamedEndpoint[],
+  config: GatekeeperConfig,
+): { endpoint: NamedEndpoint; warning?: string } {
+  const wanted = config.selectedEndpoint?.trim();
+  if (!wanted) return { endpoint: endpoints[0] };
+  const selected = endpoints.find((e) => e.name === wanted);
+  if (selected) return { endpoint: selected };
+  return {
+    endpoint: endpoints[0],
+    warning: `gate › selected endpoint "${wanted}" not found — serving "${endpoints[0].name}" instead`,
+  };
 }
 
 export const DEFAULT_POLICY = [
@@ -124,6 +171,7 @@ export const DEFAULT_CONFIG: GatekeeperConfig = {
     keepAlive: "10m",
   },
   policy: DEFAULT_POLICY,
+  multiEndpointMode: "modelSelect",
   failMode: "ask",
   stateBudgetChars: 4000,
   notify: "always",

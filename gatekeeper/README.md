@@ -11,7 +11,7 @@ Every tool call passes through the gate, in order:
 1. **Self-protection** — calls touching the gate's own config, log, or secrets definitions are always denied, `realpath`-resolved so symlink chains are caught too. Not overridable by any rule. See [ADR-0003](docs/adr/0003-the-gate-protects-itself.md).
 2. **Secrets detection** — the gitleaks corpus (~220 rules, compiled to a JS regex subset) scans the full command and file contents. A hit blocks before every rule and the model, masked (`sk-…(51 chars)`), overridable only by your `secrets.toml`. See [ADR-0004](docs/adr/0004-deterministic-secret-detection.md).
 3. **Rules** — ordered allow/deny entries (project rules first, then user, then shipped defaults). First hit wins; a fast-path, not a guard.
-4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator. With several `endpoints` configured, a **jury** runs instead ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)): every endpoint classifies in parallel, the gate waits for all, and the most pessimistic verdict wins — one dissenting `unsafe` blocks, auto-allow needs unanimity.
+4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator. With several `endpoints` configured, the entries act per `multiEndpointMode` ([ADR-0007](docs/adr/0007-multi-endpoint-modes.md)): `modelSelect` (default) — only the operator-selected endpoint classifies (first entry until you pick one: `/gate model <name>`); `jury` ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)) — every endpoint classifies in parallel, the gate waits for all, and the most pessimistic verdict wins — one dissenting `unsafe` blocks, auto-allow needs unanimity; `fallback` — the entries are tried in array order until one answers, the survivor deciding alone under the same single-judge matrix.
 5. **The operator** — a bordered prompt (classification and probabilities colored green/red/yellow) with `a: allow · n/esc: deny`. Nothing persists from a prompt; persistent allows are explicit rules.
 
 Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`failMode: block`, for headless use).
@@ -55,6 +55,8 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
   },
   "policy": "…what counts as unsafe…",
   "failMode": "ask",
+  "multiEndpointMode": "modelSelect",
+  "selectedEndpoint": "hermes",
   "stateBudgetChars": 4000,
   "endpoints": [
     { "name": "hermes", "url": "http://localhost:11434/v1/systemone", "model": "clef-flash", "timeoutMs": 30000, "keepAlive": "10m" },
@@ -85,7 +87,9 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 | `endpoint.apiKey` | — | Bearer token for remote services. Settable via `set` (the echoed value is redacted as `***`); nothing else echoes it. |
 | `endpoint.timeoutMs` | `30000` | Cold-start load of a large local model takes tens of seconds; warm calls are sub-second. |
 | `endpoint.keepAlive` | `"10m"` | Ollama-only; keeps the model warm between calls. Set `""` for strict endpoints (e.g. Cloudflare) that reject extra fields. |
-| `endpoints` | — | The endpoint **jury** ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)): an array of `{ name?, url, model, apiKey?, timeoutMs?, keepAlive? }` entries. Each entry is a self-contained endpoint; `name` defaults to `model` and resolved names must be unique (a duplicate is a config error, never an auto-rename). When present it replaces `endpoint` entirely: all entries classify each call in parallel, the gate waits for every answer, and the most pessimistic verdict wins — any confident `unsafe` auto-blocks, auto-allow needs every endpoint confident `safe` with an unsafe probability ≤ 0.1. An unavailable endpoint counts as pessimistic (`failMode` decides ask vs block). Per-call cost and latency scale with the jury — an evaluation rig, not a permanent posture. |
+| `endpoints` | — | The multi-endpoint candidates ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)/[0007](docs/adr/0007-multi-endpoint-modes.md)): an array of `{ name?, url, model, apiKey?, timeoutMs?, keepAlive? }` entries. Each entry is a self-contained endpoint; `name` defaults to `model` and resolved names must be unique (a duplicate is a config error, never an auto-rename). When present it replaces `endpoint` entirely, and the entries act per `multiEndpointMode`. |
+| `multiEndpointMode` | `"modelSelect"` | How the `endpoints` entries act ([ADR-0007](docs/adr/0007-multi-endpoint-modes.md)). `modelSelect` — only the operator-selected endpoint runs; `jury` — all classify in parallel, the gate waits for every answer, and the most pessimistic verdict wins (any confident `unsafe` auto-blocks, auto-allow needs every endpoint confident `safe` with an unsafe probability ≤ 0.1; an unavailable endpoint counts as pessimistic, `failMode` decides ask vs block) — the model-evaluation rig, opt-in now; `fallback` — the array is tried in order until one endpoint answers (only a transport failure retries; any verdict, even `unsure`, ends the chain, and the survivor decides alone under the single-judge matrix), with every call starting over from the first entry. Meaningless without `endpoints`; an invalid hand-edited value is a config error. |
+| `selectedEndpoint` | — | The endpoint `modelSelect` serves, by resolved name. Unset: the first entry. Set it with `/gate model <name>`. A stale name (endpoint removed or renamed) still serves the first entry and announces the substitution; a failing selected endpoint never substitutes another model. |
 | `policy` | built-in text | What counts as unsafe — sent to the model as classification instructions. |
 | `failMode` | `"ask"` | Model down/timeout: `"ask"` routes to the operator, `"block"` denies (headless). |
 | `stateBudgetChars` | `4000` | Character cap on the **task text** the model sees; arguments are capped to a fixed 100 characters (ADR-0002/0005). |
@@ -146,15 +150,22 @@ The scan covers the full `bash`/`powershell` command and the full serialized arg
 
 ### The decision log
 
-`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length; a secrets block logs a constant in the args column — a detected secret never lands in this log), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. A jury run attaches the per-endpoint verdicts as a `jury` array (`name`, `choice`, `confidence`, `probabilities`; an unavailable endpoint is recorded as such). Full file contents never reach the model state (ADR-0002) or this log — but a short secret the corpus misses, inside the first 100 characters of a command, is an argument and does land here.
+`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length; a secrets block logs a constant in the args column — a detected secret never lands in this log), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. A jury run attaches the per-endpoint verdicts as a `jury` array (`name`, `choice`, `confidence`, `probabilities`; an unavailable endpoint is recorded as such) — a fallback chain's attempts in the same shape, and a modelSelect run names its serving judge in an `endpoint` field. Full file contents never reach the model state (ADR-0002) or this log — but a short secret the corpus misses, inside the first 100 characters of a command, is an argument and does land here.
 
 ## Slash commands
 
 All commands are operator-run; the agent cannot invoke them.
 
-### `/gate` — status
+### `/gate` — status, or select the served endpoint
 
-Shows the effective posture: enabled, the endpoint(s) (`name @ url` — the jury members when configured), threshold, fail mode, secrets engine (rules active, last update), rule count, active log path, and session statistics.
+```
+/gate                        status: enabled, endpoints, mode, threshold, fail mode, secrets, rules, log, session stats
+/gate model                  list the configured endpoints and who is serving
+/gate model clef             select the endpoint modelSelect serves, persisted at user level
+/gate model clef --project   project-level selection (ADR-0001)
+```
+
+The status shows the `endpoints` members (`name @ url`) and, for multi-endpoint configs, a `Mode:` line — `jury › N endpoints`, `fallback › first-hit`, or `modelSelect › <judge>` (with a note when your selection no longer resolves). An invalid hand-edited mode is reported on that line.
 
 ### `/gate:secrets` — the secrets engine
 
@@ -187,7 +198,9 @@ The auto-update runs in the background on start and reports only on change or fa
 /gate:config set endpoint.url https://…
 /gate:config set endpoint.timeoutMs 60000
 /gate:config set endpoints.hermes.url https://…  set a field on a jury member (addressed by resolved name)
-/gate:config test bash '{"command":"ls /tmp"}'   fan the sample call out to every endpoint, list verdicts
+/gate:config set multiEndpointMode jury          jury / fallback / modelSelect (ADR-0007)
+/gate:config set selectedEndpoint clef           same as /gate model clef
+/gate:config test bash '{"command":"ls /tmp"}'   fan the sample call out to every endpoint, list verdicts — comparison regardless of mode
 /gate:config set secrets.autoUpdate false     stop the background auto-update
 /gate:config set log.level project              log into the repo
 /gate:config set threshold 0.8 --project        project-level override (ADR-0001)
@@ -213,4 +226,4 @@ The gate speaks the System One API (`/v1/systemone`), compatible with Ollama's d
 { "endpoint": { "url": "http://localhost:11434/v1/systemone", "model": "clef-flash" } }
 ```
 
-Swap `model` for `clef` (larger, more accurate) or point `url` at a remote service with an `apiKey`. Decision endpoints accept the tool name, the first 100 characters of the arguments, the working directory (so out-of-scope-write judgments are decidable), and the capped current task — nothing else (ADR-0002's judge-steering invariant).
+Swap `model` for `clef` (larger, more accurate) or point `url` at a remote service with an `apiKey`. Configure several endpoints and they act as one judge (`modelSelect`, the default), a parallel jury (`jury`), or an ordered fallback chain (`fallback`) — see [ADR-0007](docs/adr/0007-multi-endpoint-modes.md); switch the served judge any time with `/gate model <name>`. Decision endpoints accept the tool name, the first 100 characters of the arguments, the working directory (so out-of-scope-write judgments are decidable), and the capped current task — nothing else (ADR-0002's judge-steering invariant).

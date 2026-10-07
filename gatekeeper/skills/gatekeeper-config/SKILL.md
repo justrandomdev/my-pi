@@ -11,7 +11,9 @@ Configuration is done two ways: **slash commands** (operator-run — type them y
 
 ## Slash commands (primary — tell the user these)
 
-- `/gate` — status: effective posture (endpoint, threshold, floors, fail mode), rule count, log path, session statistics.
+- `/gate` — status: effective posture (endpoints, multi-endpoint mode, threshold, floors, fail mode), rule count, log path, session statistics. With multi-endpoint configs set, it also selects the jury member `modelSelect` serves:
+  - `/gate model` — list the configured endpoints and who is serving
+  - `/gate model <name>` — select the endpoint `modelSelect` serves, persisted at user level (`--project` supported); unknown name → warning with the candidates
 - `/gate:rules` — list, add, remove, and test rules:
   - `/gate:rules` (list; shows project `p*`, user `u*`, then shipped defaults)
   - `/gate:rules add allow "ls ?*"` — user-level allow rule; `add deny "~/creds"` for a protected path
@@ -22,6 +24,8 @@ Configuration is done two ways: **slash commands** (operator-run — type them y
   - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block (auto-allow also requires the model's unsafe probability ≤ 0.1, a fixed bound)
   - `endpoint.model`, `endpoint.url` (full request URL), `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
   - `endpoints.<name>.url` / `.model` / `.timeoutMs` — set a field on a jury member (ADR-0006) by its resolved name; the entries themselves are configured by a manual edit of the `endpoints` array
+  - `multiEndpointMode` — `modelSelect` (default) | `jury` | `fallback` (ADR-0007): how multiple endpoints act. To resume ADR-0006 model evaluation, `/gate:config set multiEndpointMode jury`. To serve only the first entry when a judge is down, `/gate:config set multiEndpointMode fallback`. An invalid value is a config error, never silently defaulted
+  - `selectedEndpoint` — the endpoint `modelSelect` serves by resolved name (`/gate model <name>` is the friendlier path)
   - `/gate:config test bash '{"command":"ls /tmp"}'` — fan the sample call out to every configured endpoint and list the verdicts side by side (jury comparison)
   - `secrets.enabled`, `secrets.autoUpdate`, `secrets.source` — the deterministic secrets engine
   - `log.level`, `log.maxLines`, `log.keepFiles`, `log.retentionDays` — decision-log behavior

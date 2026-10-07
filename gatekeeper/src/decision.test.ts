@@ -8,7 +8,7 @@ const HOME = "/home/op";
 
 function makeDeps(overrides: {
   config?: Partial<GatekeeperConfig>;
-  classify?: (input: any) => Promise<ClassificationResult>;
+  classify?: (input: any, endpoint: any) => Promise<ClassificationResult>;
   askOperator?: (prompt: any) => Promise<"allow" | "deny" | "no-ui">;
   scanSecrets?: (tool: string, args: any) => Promise<SecretsHit | undefined>;
 } = {}): { deps: GateDeps; log: any[]; notified: string[]; classifyCalls: any[]; asked: any[] } {
@@ -251,7 +251,7 @@ describe("the gate", () => {
     function juryDeps(classify: (input: any, endpoint: any) => Promise<ClassificationResult>, overrides: any = {}) {
       return makeDeps({
         ...overrides,
-        config: { ...twoEndpoints, ...overrides.config },
+        config: { ...twoEndpoints, multiEndpointMode: "jury", ...overrides.config },
         classify: async (input, endpoint) => classify(input, endpoint),
       });
     }
@@ -335,6 +335,13 @@ describe("the gate", () => {
       expect(decision.reason).toContain("minerva: unavailable");
     });
 
+    it("the transparency line tags the jury and lists every verdict (ADR-0007)", async () => {
+      const { deps, notified } = juryDeps(async (_input, endpoint) => classifyResult("safe", 0.9));
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(notified[0]).toContain("[jury] read: safe (0.90) (jury: hermes safe 0.90, minerva safe 0.90) → allowed (model)");
+    });
+
     it("a duplicate resolved name fails closed", async () => {
       const { deps } = juryDeps(async () => classifyResult("safe", 0.9), {
         config: {
@@ -350,6 +357,182 @@ describe("the gate", () => {
       expect(decision.source).toBe("fail");
       expect(decision.reason).toContain("gate config error");
       expect(decision.reason).toContain("duplicate endpoint name");
+    });
+
+    it("a config error refuses outright — the operator is never asked (ADR-0007)", async () => {
+      const { deps, asked } = juryDeps(async () => classifyResult("safe", 0.9), {
+        config: { multiEndpointMode: "juryy" as never },
+        // a willing operator must still not get the call through
+        askOperator: async () => "allow",
+      });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("fail");
+      expect(decision.reason).toContain('invalid multiEndpointMode "juryy"');
+      expect(asked).toHaveLength(0);
+    });
+  });
+
+  describe("fallback mode (ADR-0007)", () => {
+    const chain = {
+      multiEndpointMode: "fallback" as const,
+      endpoints: [
+        { name: "hermes", url: "http://a/v1/systemone", model: "m1", timeoutMs: 1000, keepAlive: "" },
+        { name: "minerva", url: "http://b/v1/systemone", model: "m2", timeoutMs: 1000, keepAlive: "" },
+      ],
+    };
+
+    function fallbackDeps(classify: (input: any, endpoint: any) => Promise<ClassificationResult>, overrides: any = {}) {
+      return makeDeps({
+        ...overrides,
+        config: { ...chain, ...overrides.config },
+        classify: async (input, endpoint) => classify(input, endpoint),
+      });
+    }
+
+    it("the first endpoint's verdict decides alone — no jury aggregation", async () => {
+      const { deps, classifyCalls, notified } = fallbackDeps(async (_input, endpoint) =>
+        endpoint.name === "hermes" ? classifyResult("unsafe", 0.71) : classifyResult("safe", 0.9));
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(1); // minerva never ran
+      expect(decision.action).toBe("block");
+      expect(decision.reason).toBe("classified unsafe (0.71)"); // single-judge wording
+      expect(notified[0]).toContain("[fallback] read: unsafe (0.71) → blocked (model) (fallback: hermes unsafe 0.71)");
+    });
+
+    it("a failed first endpoint falls back to the next; the survivor decides", async () => {
+      const { deps, classifyCalls, log } = fallbackDeps(async (_input, endpoint) => {
+        if (endpoint.name === "hermes") throw new Error("connection refused");
+        return classifyResult("safe", 0.9);
+      });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls.map((c: any) => c.endpoint.name)).toEqual(["hermes", "minerva"]);
+      expect(decision.action).toBe("allow");
+      expect(decision.source).toBe("model");
+      // the log records the attempts in order: the failure, then the verdict
+      expect(log[0].jury).toEqual([
+        { name: "hermes", choice: "unavailable", error: "connection refused" },
+        { name: "minerva", choice: "safe", confidence: 0.9, probabilities: expect.anything() },
+      ]);
+    });
+
+    it("every call starts over from the first endpoint — no circuit breaker", async () => {
+      const { deps, classifyCalls } = fallbackDeps(async (_input, endpoint) => {
+        if (endpoint.name === "hermes") throw new Error("connection refused");
+        return classifyResult("safe", 0.9);
+      });
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls.map((c: any) => c.endpoint.name)).toEqual(["hermes", "minerva", "hermes", "minerva"]);
+    });
+
+    it("a verdict-level failure does not trigger a fallback: an unsure asks (ADR-0007)", async () => {
+      const { deps, classifyCalls, asked } = fallbackDeps(async () => classifyResult("unsure", 0.55), {
+        askOperator: async () => "deny",
+      });
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(1); // an answer, however unsure, ends the chain
+      expect(asked[0].reason).toContain("model unsure (0.55)");
+    });
+
+    it("all endpoints failed: failMode ask routes to the operator with the attempts logged", async () => {
+      const { deps, classifyCalls, log, asked } = fallbackDeps(async () => {
+        throw new Error("connection refused");
+      }, { askOperator: async () => "deny" });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(2);
+      expect(asked[0].reason).toContain("model unavailable: connection refused");
+      expect(decision.source).toBe("fail");
+      expect(log[0].jury?.map((v: any) => v.choice)).toEqual(["unavailable", "unavailable"]);
+    });
+
+    it("all endpoints failed under failMode block denies", async () => {
+      const { deps, classifyCalls, asked } = fallbackDeps(async () => {
+        throw new Error("connection refused");
+      }, { config: { failMode: "block" } });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(2);
+      expect(asked).toHaveLength(0);
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("fail");
+    });
+
+    it("a partial chain's survivor below threshold asks with the single-judge reason", async () => {
+      const { deps, asked } = fallbackDeps(async (_input, endpoint) => {
+        if (endpoint.name === "hermes") throw new Error("connection refused");
+        return classifyResult("safe", 0.6);
+      }, { askOperator: async () => "deny" });
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(asked[0].reason).toContain("confidence 0.60 below threshold 0.65");
+      expect(asked[0].jury?.[0].choice).toBe("unavailable");
+    });
+  });
+
+  describe("modelSelect mode (ADR-0007)", () => {
+    const jury = {
+      endpoints: [
+        { name: "hermes", url: "http://a/v1/systemone", model: "m1", timeoutMs: 1000, keepAlive: "" },
+        { name: "minerva", url: "http://b/v1/systemone", model: "m2", timeoutMs: 1000, keepAlive: "" },
+      ],
+    };
+
+    function selectDeps(classify: (input: any, endpoint: any) => Promise<ClassificationResult>, overrides: any = {}) {
+      return makeDeps({
+        ...overrides,
+        config: { ...jury, ...overrides.config },
+        classify: async (input, endpoint) => classify(input, endpoint),
+      });
+    }
+
+    it("without a selection the first entry serves, tagged and logged by name", async () => {
+      const { deps, classifyCalls, log, notified } = selectDeps(async () => classifyResult("safe", 0.9));
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls.map((c: any) => c.endpoint.name)).toEqual(["hermes"]);
+      expect(decision.action).toBe("allow");
+      expect(decision.reason).toBe("classified safe (0.90)"); // the legacy single-judge reason
+      expect(log[0].endpoint).toBe("hermes");
+      expect(log[0].jury).toBeUndefined(); // no verdict array for a single judge
+      expect(notified[0]).toContain("[modelSelect] read: safe (0.90) hermes → allowed (model)");
+    });
+
+    it("the selection names the judge", async () => {
+      const { deps, classifyCalls, log } = selectDeps(async () => classifyResult("safe", 0.9), {
+        config: { selectedEndpoint: "minerva" },
+      });
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls.map((c: any) => c.endpoint.name)).toEqual(["minerva"]);
+      expect(log[0].endpoint).toBe("minerva");
+    });
+
+    it("a stale selection serves the first entry and warns", async () => {
+      const { deps, classifyCalls, notified } = selectDeps(async () => classifyResult("safe", 0.9), {
+        config: { selectedEndpoint: "ghost" },
+      });
+      const gate = createGate(deps);
+      await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls.map((c: any) => c.endpoint.name)).toEqual(["hermes"]);
+      expect(notified.some((n) => n.includes('gate › selected endpoint "ghost" not found — serving "hermes" instead'))).toBe(true);
+    });
+
+    it("a failing selected endpoint stops — no silent substitution (ADR-0007)", async () => {
+      const { deps, classifyCalls } = selectDeps(async (_input, endpoint) => {
+        if (endpoint.name === "minerva") throw new Error("connection refused");
+        return classifyResult("safe", 0.9);
+      }, { config: { selectedEndpoint: "minerva", }, askOperator: async () => "deny" });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(1); // hermes never substituted
+      expect(decision.source).toBe("fail");
     });
   });
 

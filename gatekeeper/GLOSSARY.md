@@ -17,8 +17,20 @@ The decision model's judgment of a call: `safe`, `unsafe`, or `unsure`.
 _Avoid_: verdict, rating
 
 **Jury**:
-Multiple configured endpoints classifying the same call in parallel; the most pessimistic verdict wins, and an unavailable endpoint counts as pessimistic.
+The `multiEndpointMode: "jury"` act: multiple configured endpoints classifying the same call in parallel; the most pessimistic verdict wins, and an unavailable endpoint counts as pessimistic. The model-evaluation rig (ADR-0006), opt-in since ADR-0007.
 _Avoid_: ensemble, committee, panel
+
+**modelSelect**:
+The default multi-endpoint act (ADR-0007): exactly one configured endpoint — the operator's `selectedEndpoint` (set live with `/gate model <name>`), else the first entry — classifies alone. A failing selected endpoint never substitutes another judge.
+_Avoid_: primary endpoint, active endpoint
+
+**Fallback**:
+The `multiEndpointMode: "fallback"` act (ADR-0007): endpoints tried in array order until one answers; only a transport failure moves on (any verdict, even `unsure`, ends the chain), the survivor decides alone, and every call starts over from the first entry. All entries failing falls to `failMode`.
+_Avoid_: failover, retry chain
+
+**Selection**:
+The operator's choice of served endpoint, stored as `selectedEndpoint` by resolved name. A stale name still serves the first entry and announces the substitution — never a silent default.
+_Avoid_: chosen model, active selection
 
 **Endpoint**:
 One Jev/System One-compatible service plus the model it serves; identified by a unique resolved name (defaulting to the model name) shown in the prompt and log.

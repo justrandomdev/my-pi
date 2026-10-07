@@ -5,7 +5,7 @@
  */
 
 import type { ClassifyInput, Classification, ClassificationResult, ClassifierEndpoint } from "./classifier.js";
-import { resolveEndpoints, type GatekeeperConfig, type NamedEndpoint } from "./config.js";
+import { resolveEndpoints, resolveMode, selectEndpoint, type GatekeeperConfig, type MultiEndpointMode, type NamedEndpoint } from "./config.js";
 import { gateDirs, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
 import type { SecretsHit } from "./secrets.js";
 
@@ -18,9 +18,12 @@ export interface Decision {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
-  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006); absent
+  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006) or a
+   *  fallback chain (the attempts that ran, in order — ADR-0007); absent
    *  for non-model sources. */
   jury?: JuryVerdict[];
+  /** The serving judge's resolved name when modelSelect ran (ADR-0007). */
+  endpoint?: string;
 }
 
 export interface LogRecord {
@@ -31,8 +34,11 @@ export interface LogRecord {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
-  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006). */
+  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006) or a
+   *  fallback chain's attempts (ADR-0007). */
   jury?: JuryVerdict[];
+  /** The serving judge's resolved name when modelSelect ran (ADR-0007). */
+  endpoint?: string;
   reason?: string;
 }
 
@@ -42,7 +48,9 @@ export interface OperatorPromptInfo {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
-  /** Per-endpoint verdicts to display when a jury ran (ADR-0006). */
+  /** Per-endpoint verdicts to display when a multi-endpoint act ran
+   *  (ADR-0006): one row per jury endpoint, per fallback attempt, or the
+   *  single modelSelect judge. */
   jury?: JuryVerdict[];
   /** Why this call reached the operator. */
   reason: string;
@@ -72,7 +80,7 @@ export interface GateDeps {
   home: string;
   getConfig(): GatekeeperConfig;
   /** Classify against one endpoint; the gate fans out over the resolved
-   *  endpoints itself (parallel, wait-for-all — ADR-0006). */
+   *  endpoints itself, per the multi-endpoint act (ADR-0006/0007). */
   classify(input: ClassifyInput, endpoint: NamedEndpoint): Promise<ClassificationResult>;
   askOperator(prompt: OperatorPromptInfo): Promise<"allow" | "deny" | "no-ui">;
   notify(line: string): void;
@@ -126,6 +134,10 @@ export function createGate(deps: GateDeps): Gate {
   return {
     async decide({ tool, args, task, cwd }: DecideInput): Promise<Decision> {
       const config = deps.getConfig();
+      // The multi-endpoint act is meaningful only with an `endpoints` array
+      // (ADR-0007); the singular `endpoint` is one judge regardless of mode.
+      const multi = (config.endpoints?.length ?? 0) > 0;
+      let mode: MultiEndpointMode | undefined;
 
       const raw = JSON.stringify(args ?? {});
       // The operator prompt keeps a capped preview — the operator is human.
@@ -147,13 +159,33 @@ export function createGate(deps: GateDeps): Gate {
           config.notify === "off" || (config.notify === "summary" && decision.action === "allow");
         if (!skipNotify) {
           // A jury run names every verdict in the transparency line — the
-          // operator sees the disagreement, not just the outcome.
-          const juryLine = decision.jury?.length
+          // operator sees the disagreement, not just the outcome. Every
+          // multi-endpoint act is tagged with its mode (ADR-0007).
+          const juryLine = decision.jury?.length && mode === "jury"
             ? ` (jury: ${decision.jury
               .map((v) => `${v.name} ${v.choice === "unavailable" ? "unavailable" : `${v.choice} ${(v.confidence ?? 0).toFixed(2)}`}`)
               .join(", ")})`
             : "";
-          deps.notify(`gate › ${tool}: ${label}${juryLine} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
+          // A fallback chain names its attempts in order at the end of the
+          // line — a sequence, not a simultaneous panel.
+          const fallbackLine = decision.jury?.length && mode === "fallback"
+            ? ` (fallback: ${decision.jury
+              .map((v) => `${v.name} ${v.choice === "unavailable" ? `unavailable (${v.error ?? "no answer"})` : `${v.choice} ${(v.confidence ?? 0).toFixed(2)}`}`)
+              .join(", ")})`
+            : "";
+          const tag = decision.jury?.length || decision.endpoint
+            ? mode === "jury" && decision.jury?.length
+              ? "[jury] "
+              : mode === "fallback" && decision.jury?.length
+              ? "[fallback] "
+              : mode === "modelSelect" && decision.endpoint
+              ? "[modelSelect] "
+              : ""
+            : "";
+          const servingName = tag === "[modelSelect] " ? ` ${decision.endpoint}` : "";
+          deps.notify(
+            `gate › ${tag}${tool}: ${label}${juryLine}${servingName} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})${fallbackLine}`,
+          );
         }
         // A secrets hit can put the matched text inside the first 100
         // characters of the serialized args — exactly the view logArgs
@@ -171,6 +203,7 @@ export function createGate(deps: GateDeps): Gate {
           confidence: decision.confidence,
           probabilities: decision.probabilities,
           jury: decision.jury,
+          endpoint: decision.endpoint,
           reason: decision.reason,
         });
         return decision;
@@ -219,15 +252,20 @@ export function createGate(deps: GateDeps): Gate {
         });
       }
 
-      // The model gate: the primary classifier (ADR-0005). With more than
-      // one endpoint, a jury (ADR-0006): every endpoint classifies in
-      // parallel, the gate waits for all of them, and the most pessimistic
-      // verdict wins — any confident unsafe blocks, unanimous confident
-      // safe auto-allows, everything else asks. An unavailable endpoint
-      // counts as pessimistic.
+      // The model gate: the primary classifier (ADR-0005). With an
+      // `endpoints` array the multi-endpoint act applies (ADR-0007):
+      // `jury` — every endpoint classifies in parallel, the gate waits for
+      // all of them, and the most pessimistic verdict wins (ADR-0006);
+      // `fallback` — the entries are tried in array order until one
+      // answers, then start over every call; `modelSelect` — the
+      // operator's selected endpoint alone. Without the array the singular
+      // `endpoint` runs as one judge, whatever the mode.
       let verdicts: JuryVerdict[];
       let configError: string | undefined;
+      let staleWarning: string | undefined;
+      let servingName: string | undefined; // modelSelect's judge, for the log
       try {
+        mode = resolveMode(config);
         const input: ClassifyInput = {
           tool,
           args: modelArgs,
@@ -239,70 +277,108 @@ export function createGate(deps: GateDeps): Gate {
           protectedPaths: [...gateDirs(deps.home, cwd), ...protectedPatterns(config.rules)],
           policy: config.policy,
         };
-        verdicts = await Promise.all(
-          resolveEndpoints(config).map(async (endpoint): Promise<JuryVerdict> => {
-            try {
-              const r = await deps.classify(input, endpoint);
-              return { name: endpoint.name, choice: r.choice, confidence: r.confidence, probabilities: r.probabilities };
-            } catch (error) {
-              return { name: endpoint.name, choice: "unavailable", error: (error as Error).message };
-            }
-          }),
-        );
+        const runOne = async (endpoint: NamedEndpoint): Promise<JuryVerdict> => {
+          try {
+            const r = await deps.classify(input, endpoint);
+            return { name: endpoint.name, choice: r.choice, confidence: r.confidence, probabilities: r.probabilities };
+          } catch (error) {
+            return { name: endpoint.name, choice: "unavailable", error: (error as Error).message };
+          }
+        };
+        const endpoints = resolveEndpoints(config);
+        if (multi && mode === "fallback") {
+          // Availability, not pessimism: stop at the first endpoint that
+          // answers. Transport failures here are never verdicts.
+          verdicts = [];
+          for (const endpoint of endpoints) {
+            const verdict = await runOne(endpoint);
+            verdicts.push(verdict);
+            if (verdict.choice !== "unavailable") break;
+          }
+        } else if (multi && mode === "modelSelect") {
+          const { endpoint, warning } = selectEndpoint(endpoints, config);
+          staleWarning = warning;
+          servingName = endpoint.name;
+          verdicts = [await runOne(endpoint)];
+        } else {
+          verdicts = await Promise.all(endpoints.map((endpoint) => runOne(endpoint)));
+        }
+        if (staleWarning) deps.notify(staleWarning);
       } catch (error) {
-        // Endpoint resolution itself failed (e.g. duplicate names): fail-closed.
+        // Endpoint resolution itself failed (e.g. duplicate names, an
+        // unknown mode): fail-closed.
         verdicts = [];
         configError = `gate config error: ${(error as Error).message}`;
       }
 
-      const jury = verdicts.length > 1;
+      // A config error means the posture is unreadable: refuse outright —
+      // fail-closed, never operator-discretionary (ADR-0006/0007).
+      if (configError) {
+        return finish({ action: "block", source: "fail", reason: configError });
+      }
+
+      const isJury = multi && mode === "jury" && verdicts.length > 1;
+      // Non-jury acts decide on the serving verdict only (ADR-0005's matrix
+      // applied to one judge): failed fallback attempts never produced a
+      // verdict, and modelSelect has exactly one.
+      const serving = isJury ? verdicts : verdicts.filter((v) => v.choice !== "unavailable");
+      const unavailable = verdicts.filter((v) => v.choice === "unavailable");
+      // The model gate has nothing to decide on: every judge a jury needs
+      // is in, or a fallback chain/modelSelect produced no verdict at all.
+      const noVerdict = isJury ? unavailable.length > 0 : serving.length === 0 && unavailable.length > 0;
+      // Log/prompt attachment per act (ADR-0007): the jury lists every
+      // verdict, a fallback chain its attempts, modelSelect just the name.
+      const recordVerdicts = isJury || (multi && mode === "fallback");
+      const isModelSelect = multi && mode === "modelSelect";
 
       // Most pessimistic first: any confident unsafe auto-blocks, whoever
       // said it.
-      const blocking = verdicts.find((v) => confidentUnsafe(v, config.threshold));
+      const blocking = serving.find((v) => confidentUnsafe(v, config.threshold));
       if (blocking) {
         return finish({
           action: "block",
           source: "model",
-          reason: jury
+          reason: isJury
             ? `${blocking.name} classified unsafe (${blocking.confidence!.toFixed(2)})`
             : `classified unsafe (${blocking.confidence!.toFixed(2)})`,
           classification: "unsafe",
           confidence: blocking.confidence,
           probabilities: blocking.probabilities,
-          jury: jury ? verdicts : undefined,
+          jury: recordVerdicts ? verdicts : undefined,
+          endpoint: isModelSelect ? servingName : undefined,
         });
       }
 
-      // An unavailable endpoint is pessimistic (ADR-0006): with failMode
+      // An answer is unavailable, or every judge failed: with failMode
       // block it denies outright; with failMode ask it always asks.
-      const failed = verdicts.filter((v) => v.choice === "unavailable");
-      if (failed.length && config.failMode === "block") {
+      if (noVerdict && config.failMode === "block") {
         return finish({
           action: "block",
           source: "fail",
-          reason: jury
-            ? failed.map((v) => verdictObjection(v, config.threshold, true)).join("; ")
-            : `model unavailable: ${failed[0].error}`,
-          jury: jury ? verdicts : undefined,
+          reason: isJury
+            ? unavailable.map((v) => verdictObjection(v, config.threshold, true)).join("; ")
+            : `model unavailable: ${unavailable[0]?.error ?? "no answer"}`,
+          jury: recordVerdicts ? verdicts : undefined,
+          endpoint: isModelSelect ? servingName : undefined,
         });
       }
 
       // Auto-allow only on unanimity: every endpoint confident safe with a
       // negligible unsafe probability (ADR-0005/0006).
-      const unanimousSafe = verdicts.length > 0 && verdicts.every((v) => confidentSafe(v, config.threshold));
+      const unanimousSafe = serving.length > 0 && serving.every((v) => confidentSafe(v, config.threshold));
       if (unanimousSafe) {
-        const weakest = Math.min(...verdicts.map((v) => v.confidence ?? 0));
+        const weakest = Math.min(...serving.map((v) => v.confidence ?? 0));
         return finish({
           action: "allow",
           source: "model",
-          reason: jury
+          reason: isJury
             ? `jury classified safe (weakest confidence ${weakest.toFixed(2)})`
-            : `classified safe (${verdicts[0].confidence!.toFixed(2)})`,
+            : `classified safe (${serving[0].confidence!.toFixed(2)})`,
           classification: "safe",
           confidence: weakest,
-          probabilities: verdicts[0].probabilities,
-          jury: jury ? verdicts : undefined,
+          probabilities: serving[0].probabilities,
+          jury: recordVerdicts ? verdicts : undefined,
+          endpoint: isModelSelect ? servingName : undefined,
         });
       }
 
@@ -310,24 +386,24 @@ export function createGate(deps: GateDeps): Gate {
       // deny, nothing persisted (ADR-0005). Legacy single-endpoint reasons
       // unchanged; a jury names every objection.
       const reason = configError
-        ?? (jury
+        ?? (isJury
           ? verdicts
             .filter((v) => !confidentSafe(v, config.threshold))
             .map((v) => verdictObjection(v, config.threshold, true))
             .join("; ")
-          : failed.length
-            ? `model unavailable: ${failed[0].error}`
-            : verdicts[0].choice === "unsure"
-              ? `model unsure (${verdicts[0].confidence!.toFixed(2)})`
-              : (verdicts[0].confidence ?? 0) < config.threshold
-                ? `confidence ${(verdicts[0].confidence ?? 0).toFixed(2)} below threshold ${config.threshold}`
-                : `unsafe probability ${(verdicts[0].probabilities?.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`);
+          : serving.length
+            ? serving[0].choice === "unsure"
+              ? `model unsure (${serving[0].confidence!.toFixed(2)})`
+              : (serving[0].confidence ?? 0) < config.threshold
+                ? `confidence ${(serving[0].confidence ?? 0).toFixed(2)} below threshold ${config.threshold}`
+                : `unsafe probability ${(serving[0].probabilities?.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`
+            : `model unavailable: ${unavailable[0]?.error ?? "no answer"}`);
 
       const aggregate = (): { classification?: Classification; confidence?: number; probabilities?: Record<string, number> } => {
         // The most pessimistic classification among the endpoints that
         // answered: unsafe > unsure > safe.
         for (const choice of ["unsafe", "unsure", "safe"] as const) {
-          const v = verdicts.find((x) => x.choice === choice);
+          const v = serving.find((x) => x.choice === choice);
           if (v) return { classification: choice, confidence: v.confidence, probabilities: v.probabilities };
         }
         return {};
@@ -340,18 +416,18 @@ export function createGate(deps: GateDeps): Gate {
         classification: shown.classification,
         confidence: shown.confidence,
         probabilities: shown.probabilities,
-        jury: jury ? verdicts : undefined,
+        jury: recordVerdicts || isModelSelect ? verdicts : undefined,
         reason,
       });
 
-      const cause: DecisionSource = configError || failed.length ? "fail" : "operator";
+      const cause: DecisionSource = configError || noVerdict ? "fail" : "operator";
       if (outcome === "no-ui") {
-        return finish({ action: "block", source: cause, reason: `${reason}; no UI available to confirm`, jury: jury ? verdicts : undefined });
+        return finish({ action: "block", source: cause, reason: `${reason}; no UI available to confirm`, jury: recordVerdicts || isModelSelect ? verdicts : undefined, endpoint: isModelSelect ? servingName : undefined });
       }
       if (outcome === "deny") {
-        return finish({ action: "block", source: cause, reason: `${reason}; operator denied`, jury: jury ? verdicts : undefined });
+        return finish({ action: "block", source: cause, reason: `${reason}; operator denied`, jury: recordVerdicts || isModelSelect ? verdicts : undefined, endpoint: isModelSelect ? servingName : undefined });
       }
-      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed`, jury: jury ? verdicts : undefined });
+      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed`, jury: recordVerdicts || isModelSelect ? verdicts : undefined, endpoint: isModelSelect ? servingName : undefined });
     },
   };
 }
