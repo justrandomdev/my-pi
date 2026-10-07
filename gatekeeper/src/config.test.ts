@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, resolveConfig } from "./config.js";
+import { DEFAULT_CONFIG, resolveConfig, resolveEndpoints, type GatekeeperConfig } from "./config.js";
 
 describe("config resolution", () => {
   it("defaults to the documented posture", () => {
@@ -62,5 +62,44 @@ describe("config resolution", () => {
 
   it("defaults survive when no scoped config exists", () => {
     expect(resolveConfig({})).toEqual(DEFAULT_CONFIG);
+  });
+});
+
+describe("resolveEndpoints", () => {
+  it("falls back to the singular endpoint as a one-member jury", () => {
+    expect(resolveEndpoints(DEFAULT_CONFIG)).toEqual([{ name: "clef-flash", ...DEFAULT_CONFIG.endpoint }]);
+  });
+
+  it("the endpoints array wins over the singular endpoint when present", () => {
+    const config = {
+      ...structuredClone(DEFAULT_CONFIG),
+      endpoints: [
+        { name: "hermes", url: "http://a/v1/systemone", model: "m1", timeoutMs: 1000, keepAlive: "" },
+        { url: "http://b/v1/systemone", model: "m2", timeoutMs: 2000, keepAlive: "10m" },
+      ],
+    } as GatekeeperConfig;
+    expect(resolveEndpoints(config)).toEqual([
+      { name: "hermes", url: "http://a/v1/systemone", model: "m1", timeoutMs: 1000, keepAlive: "" },
+      { name: "m2", url: "http://b/v1/systemone", model: "m2", timeoutMs: 2000, keepAlive: "10m" },
+    ]);
+  });
+
+  it("rejects duplicate resolved names", () => {
+    const config = {
+      ...structuredClone(DEFAULT_CONFIG),
+      endpoints: [
+        { url: "http://a/v1/systemone", model: "same", timeoutMs: 1000, keepAlive: "" },
+        { url: "http://b/v1/systemone", model: "same", timeoutMs: 1000, keepAlive: "" },
+      ],
+    } as GatekeeperConfig;
+    expect(() => resolveEndpoints(config)).toThrow(/duplicate endpoint name "same"/);
+  });
+
+  it("rejects entries resolving to an empty name", () => {
+    const config = {
+      ...structuredClone(DEFAULT_CONFIG),
+      endpoints: [{ name: "   ", url: "http://a/v1/systemone", model: "m", timeoutMs: 1000, keepAlive: "" }],
+    } as unknown as GatekeeperConfig;
+    expect(() => resolveEndpoints(config)).toThrow(/empty name/);
   });
 });

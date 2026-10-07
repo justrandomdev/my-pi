@@ -21,13 +21,15 @@ Configuration is done two ways: **slash commands** (operator-run — type them y
 - `/gate:config` — show effective config, or set keys:
   - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block (auto-allow also requires the model's unsafe probability ≤ 0.1, a fixed bound)
   - `endpoint.model`, `endpoint.url` (full request URL), `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
+  - `endpoints.<name>.url` / `.model` / `.timeoutMs` — set a field on a jury member (ADR-0006) by its resolved name; the entries themselves are configured by a manual edit of the `endpoints` array
+  - `/gate:config test bash '{"command":"ls /tmp"}'` — fan the sample call out to every configured endpoint and list the verdicts side by side (jury comparison)
   - `secrets.enabled`, `secrets.autoUpdate`, `secrets.source` — the deterministic secrets engine
   - `log.level`, `log.maxLines`, `log.keepFiles`, `log.retentionDays` — decision-log behavior
   - append `--project` to set at project level (project overrides user per key)
 - `/gate:secrets` — the secrets engine: status (rules active, source, last update), `update` (force a refresh), `test "<text>"` (which rule matches a sample string, masked). A secret-shaped tool call of yours will be blocked before the model with the rule id — if it is a false positive (a fake key in a test fixture, for example), the operator suppresses it in `~/.pi/agent/gate/secrets.toml` (`[[allow]]` with the rule id and a `path`), never by weakening the rules.
 - `/gate:log` — review decisions: `/gate:log 50 bash` tails the last 50 bash decisions. Use this to investigate why a call was allowed, blocked, or asked.
 
-Note: `endpoint.apiKey` must be set by manual edit — the `set` command echoes values into notifications.
+Note: `endpoint.apiKey` is settable via `set` — the echoed value is redacted as `***`, so the key never lands in a notification.
 
 ## Manual configuration (secondary)
 

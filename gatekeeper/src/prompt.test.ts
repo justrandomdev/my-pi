@@ -86,6 +86,34 @@ describe("gate prompt component", () => {
     expect(render({ ...info, probabilities: {} }).join("\n")).not.toContain("Probabilities:");
   });
 
+  it("renders a jury as one colored verdict row plus a dim probabilities row per endpoint", () => {
+    const text = render({
+      ...info,
+      jury: [
+        { name: "hermes", choice: "safe", confidence: 0.9, probabilities: { safe: 0.9, unsafe: 0.05, unsure: 0.05 } },
+        { name: "minerva", choice: "unsafe", confidence: 0.71, probabilities: { safe: 0.2, unsafe: 0.71, unsure: 0.09 } },
+        { name: "athena", choice: "unavailable", error: "connection refused" },
+      ],
+    }).join("\n");
+    // rows are padded before coloring, so only the opening tag position is exact
+    expect(text).toContain("<success>hermes: safe 0.90");
+    expect(text).toContain("<error>minerva: unsafe 0.71");
+    expect(text).toContain("<warning>athena: unavailable");
+    // the distributions ride under each verdict, dimmed
+    expect(text).toContain("<dim>  safe 0.90 · unsafe 0.05 · unsure 0.05");
+    // no single-endpoint probabilities line in jury mode
+    expect(text).not.toContain("Probabilities:");
+  });
+
+  it("a jury row wider than the box truncates without breaking the border", () => {
+    const lines = render({
+      ...info,
+      jury: [{ name: "a-very-long-endpoint-name-that-exceeds-the-box-width-somehow", choice: "safe", confidence: 0.9 }],
+    }, 40).map((l) => l.replace(/<[^>]+>/g, ""));
+    const widths = new Set(lines.map((l) => l.length));
+    expect(widths.size).toBe(1);
+  });
+
   it("esc denies and n denies", () => {
     for (const [key, expected] of [
       ["\x1b", "deny"],

@@ -16,6 +16,48 @@ export interface EndpointConfig {
   keepAlive: string;
 }
 
+/** One member of an endpoint jury (ADR-0006): a self-contained endpoint.
+ *  `name` is the display identity — it defaults to `model` at resolution,
+ *  and resolved names must be unique (they appear in the TUI, log, and
+ *  notify line). */
+export interface EndpointEntry extends EndpointConfig {
+  name?: string;
+}
+
+/** An endpoint with its resolved display name. */
+export interface NamedEndpoint extends EndpointConfig {
+  name: string;
+}
+
+/** Resolve the active endpoints: the `endpoints` jury when present, else
+ *  the singular legacy `endpoint` as a one-member jury (ADR-0006). Names
+ *  default to the model name; duplicates or empty names are config errors
+ *  — fail loudly, never silently rename a judge. */
+export function resolveEndpoints(config: GatekeeperConfig): NamedEndpoint[] {
+  const entries: EndpointEntry[] = config.endpoints?.length ? config.endpoints : [config.endpoint];
+  const resolved = entries.map((entry) => ({
+    name: (entry.name ?? entry.model).trim(),
+    url: entry.url,
+    model: entry.model,
+    apiKey: entry.apiKey,
+    timeoutMs: entry.timeoutMs,
+    keepAlive: entry.keepAlive,
+  }));
+  const empty = resolved.find((e) => e.name === "");
+  if (empty) throw new Error("an endpoint entry resolves to an empty name (set `name` or a non-empty `model`)");
+  const seen = new Map<string, NamedEndpoint>();
+  for (const endpoint of resolved) {
+    const dup = seen.get(endpoint.name);
+    if (dup) {
+      throw new Error(
+        `duplicate endpoint name "${endpoint.name}" (${dup.url} and ${endpoint.url}) — endpoint names must be unique`,
+      );
+    }
+    seen.set(endpoint.name, endpoint);
+  }
+  return resolved;
+}
+
 export interface LogConfig {
   level: "user" | "project";
   maxLines: number;
@@ -40,6 +82,10 @@ export interface GatekeeperConfig {
    *  requires a negligible unsafe probability (a fixed bound, see decision.ts). */
   threshold: number;
   endpoint: EndpointConfig;
+  /** The endpoint jury (ADR-0006). Present and non-empty: every entry
+   *  classifies in parallel and the most pessimistic verdict wins.
+   *  Absent: the singular `endpoint` runs as a one-member jury. */
+  endpoints?: EndpointEntry[];
   /** What counts as unsafe; sent to the model as classification instructions. */
   policy: string;
   /** Behavior when the model fails or times out. */

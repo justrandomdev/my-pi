@@ -4,8 +4,8 @@
  * See docs/spec.md.
  */
 
-import type { ClassifyInput, Classification, ClassificationResult } from "./classifier.js";
-import type { GatekeeperConfig } from "./config.js";
+import type { ClassifyInput, Classification, ClassificationResult, ClassifierEndpoint } from "./classifier.js";
+import { resolveEndpoints, type GatekeeperConfig, type NamedEndpoint } from "./config.js";
 import { gateDirs, matchRules, protectedPatterns, touchesGatePaths, type Rule } from "./rules.js";
 import type { SecretsHit } from "./secrets.js";
 
@@ -18,6 +18,9 @@ export interface Decision {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
+  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006); absent
+   *  for non-model sources. */
+  jury?: JuryVerdict[];
 }
 
 export interface LogRecord {
@@ -28,6 +31,8 @@ export interface LogRecord {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
+  /** Per-endpoint verdicts when the gate ran a jury (ADR-0006). */
+  jury?: JuryVerdict[];
   reason?: string;
 }
 
@@ -37,8 +42,22 @@ export interface OperatorPromptInfo {
   classification?: Classification;
   confidence?: number;
   probabilities?: Record<string, number>;
+  /** Per-endpoint verdicts to display when a jury ran (ADR-0006). */
+  jury?: JuryVerdict[];
   /** Why this call reached the operator. */
   reason: string;
+}
+
+/** One endpoint's outcome in a jury run (ADR-0006): a classification, or
+ *  `unavailable` — which counts as pessimistic. The gate waits for every
+ *  endpoint before deciding. */
+export interface JuryVerdict {
+  name: string;
+  choice: Classification | "unavailable";
+  confidence?: number;
+  probabilities?: Record<string, number>;
+  /** Why the endpoint was unavailable (its error message). */
+  error?: string;
 }
 
 export interface DecideInput {
@@ -52,7 +71,9 @@ export interface DecideInput {
 export interface GateDeps {
   home: string;
   getConfig(): GatekeeperConfig;
-  classify(input: ClassifyInput): Promise<ClassificationResult>;
+  /** Classify against one endpoint; the gate fans out over the resolved
+   *  endpoints itself (parallel, wait-for-all — ADR-0006). */
+  classify(input: ClassifyInput, endpoint: NamedEndpoint): Promise<ClassificationResult>;
   askOperator(prompt: OperatorPromptInfo): Promise<"allow" | "deny" | "no-ui">;
   notify(line: string): void;
   writeLog(record: LogRecord): void;
@@ -76,6 +97,29 @@ const MAX_UNSAFE_PROBABILITY = 0.1;
 
 function cap(text: string, budget: number): string {
   return text.length <= budget ? text : `${text.slice(0, budget)}…`;
+}
+
+/** Is this verdict a confident auto-block? One knob for the whole jury. */
+function confidentUnsafe(v: JuryVerdict, threshold: number): boolean {
+  return v.choice === "unsafe" && (v.confidence ?? 0) >= threshold;
+}
+
+/** Is this verdict confident enough to auto-allow (ADR-0005/0006)? A
+ *  negligible unsafe probability is required; missing probabilities
+ *  count as unmet. */
+function confidentSafe(v: JuryVerdict, threshold: number): boolean {
+  return v.choice === "safe" && (v.confidence ?? 0) >= threshold && (v.probabilities?.unsafe ?? 1) <= MAX_UNSAFE_PROBABILITY;
+}
+
+/** Why a verdict cannot auto-allow, as a human-readable clause. With a
+ *  jury the clause names the endpoint; legacy single-endpoint messages
+ *  stay exactly as they were. */
+function verdictObjection(v: JuryVerdict, threshold: number, withName: boolean): string {
+  const who = withName ? `${v.name}: ` : "";
+  if (v.choice === "unavailable") return `${who}unavailable (${v.error ?? "no answer"})`;
+  if (v.choice === "unsure") return `${who}unsure (${(v.confidence ?? 0).toFixed(2)})`;
+  if ((v.confidence ?? 0) < threshold) return `${who}confidence ${(v.confidence ?? 0).toFixed(2)} below threshold ${threshold}`;
+  return `${who}unsafe probability ${(v.probabilities?.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`;
 }
 
 export function createGate(deps: GateDeps): Gate {
@@ -102,7 +146,14 @@ export function createGate(deps: GateDeps): Gate {
         const skipNotify =
           config.notify === "off" || (config.notify === "summary" && decision.action === "allow");
         if (!skipNotify) {
-          deps.notify(`gate › ${tool}: ${label} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
+          // A jury run names every verdict in the transparency line — the
+          // operator sees the disagreement, not just the outcome.
+          const juryLine = decision.jury?.length
+            ? ` (jury: ${decision.jury
+              .map((v) => `${v.name} ${v.choice === "unavailable" ? "unavailable" : `${v.choice} ${(v.confidence ?? 0).toFixed(2)}`}`)
+              .join(", ")})`
+            : "";
+          deps.notify(`gate › ${tool}: ${label}${juryLine} → ${decision.action === "allow" ? "allowed" : "blocked"} (${decision.source})`);
         }
         // A secrets hit can put the matched text inside the first 100
         // characters of the serialized args — exactly the view logArgs
@@ -119,6 +170,7 @@ export function createGate(deps: GateDeps): Gate {
           classification: decision.classification,
           confidence: decision.confidence,
           probabilities: decision.probabilities,
+          jury: decision.jury,
           reason: decision.reason,
         });
         return decision;
@@ -167,11 +219,16 @@ export function createGate(deps: GateDeps): Gate {
         });
       }
 
-      // The model gate: the primary classifier (ADR-0005).
-      let classification: ClassificationResult | undefined;
-      let failure: string | undefined;
+      // The model gate: the primary classifier (ADR-0005). With more than
+      // one endpoint, a jury (ADR-0006): every endpoint classifies in
+      // parallel, the gate waits for all of them, and the most pessimistic
+      // verdict wins — any confident unsafe blocks, unanimous confident
+      // safe auto-allows, everything else asks. An unavailable endpoint
+      // counts as pessimistic.
+      let verdicts: JuryVerdict[];
+      let configError: string | undefined;
       try {
-        classification = await deps.classify({
+        const input: ClassifyInput = {
           tool,
           args: modelArgs,
           task: cap(task, config.stateBudgetChars),
@@ -181,60 +238,120 @@ export function createGate(deps: GateDeps): Gate {
           cwd,
           protectedPaths: [...gateDirs(deps.home, cwd), ...protectedPatterns(config.rules)],
           policy: config.policy,
-        });
+        };
+        verdicts = await Promise.all(
+          resolveEndpoints(config).map(async (endpoint): Promise<JuryVerdict> => {
+            try {
+              const r = await deps.classify(input, endpoint);
+              return { name: endpoint.name, choice: r.choice, confidence: r.confidence, probabilities: r.probabilities };
+            } catch (error) {
+              return { name: endpoint.name, choice: "unavailable", error: (error as Error).message };
+            }
+          }),
+        );
       } catch (error) {
-        failure = `model unavailable: ${(error as Error).message}`;
+        // Endpoint resolution itself failed (e.g. duplicate names): fail-closed.
+        verdicts = [];
+        configError = `gate config error: ${(error as Error).message}`;
       }
 
-      if (!failure) {
-        const c = classification!;
-        // Auto-allow requires negligible harm risk: confidence at or above
-        // the threshold AND an unsafe probability at or below the fixed
-        // bound — a concentrated `safe` with non-negligible unsafe mass
-        // asks. Missing probabilities count as unmet.
-        const confidentSafe =
-          c.choice === "safe" &&
-          c.confidence >= config.threshold &&
-          (c.probabilities.unsafe ?? 1) <= MAX_UNSAFE_PROBABILITY;
-        const confidentUnsafe = c.choice === "unsafe" && c.confidence >= config.threshold;
+      const jury = verdicts.length > 1;
 
-        if (confidentUnsafe) {
-          return finish({ action: "block", source: "model", reason: `classified unsafe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
-        }
-        if (confidentSafe) {
-          return finish({ action: "allow", source: "model", reason: `classified safe (${c.confidence.toFixed(2)})`, classification: c.choice, confidence: c.confidence, probabilities: c.probabilities });
-        }
-      } else if (config.failMode === "block") {
-        return finish({ action: "block", source: "fail", reason: failure });
+      // Most pessimistic first: any confident unsafe auto-blocks, whoever
+      // said it.
+      const blocking = verdicts.find((v) => confidentUnsafe(v, config.threshold));
+      if (blocking) {
+        return finish({
+          action: "block",
+          source: "model",
+          reason: jury
+            ? `${blocking.name} classified unsafe (${blocking.confidence!.toFixed(2)})`
+            : `classified unsafe (${blocking.confidence!.toFixed(2)})`,
+          classification: "unsafe",
+          confidence: blocking.confidence,
+          probabilities: blocking.probabilities,
+          jury: jury ? verdicts : undefined,
+        });
+      }
+
+      // An unavailable endpoint is pessimistic (ADR-0006): with failMode
+      // block it denies outright; with failMode ask it always asks.
+      const failed = verdicts.filter((v) => v.choice === "unavailable");
+      if (failed.length && config.failMode === "block") {
+        return finish({
+          action: "block",
+          source: "fail",
+          reason: jury
+            ? failed.map((v) => verdictObjection(v, config.threshold, true)).join("; ")
+            : `model unavailable: ${failed[0].error}`,
+          jury: jury ? verdicts : undefined,
+        });
+      }
+
+      // Auto-allow only on unanimity: every endpoint confident safe with a
+      // negligible unsafe probability (ADR-0005/0006).
+      const unanimousSafe = verdicts.length > 0 && verdicts.every((v) => confidentSafe(v, config.threshold));
+      if (unanimousSafe) {
+        const weakest = Math.min(...verdicts.map((v) => v.confidence ?? 0));
+        return finish({
+          action: "allow",
+          source: "model",
+          reason: jury
+            ? `jury classified safe (weakest confidence ${weakest.toFixed(2)})`
+            : `classified safe (${verdicts[0].confidence!.toFixed(2)})`,
+          classification: "safe",
+          confidence: weakest,
+          probabilities: verdicts[0].probabilities,
+          jury: jury ? verdicts : undefined,
+        });
       }
 
       // Everything the model cannot settle goes to the operator: allow or
-      // deny, nothing persisted (ADR-0005).
-      const reason =
-        failure ??
-        (classification!.choice === "unsure"
-          ? `model unsure (${classification!.confidence.toFixed(2)})`
-          : classification!.confidence < config.threshold
-            ? `confidence ${classification!.confidence.toFixed(2)} below threshold ${config.threshold}`
-            : `unsafe probability ${(classification!.probabilities.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`);
+      // deny, nothing persisted (ADR-0005). Legacy single-endpoint reasons
+      // unchanged; a jury names every objection.
+      const reason = configError
+        ?? (jury
+          ? verdicts
+            .filter((v) => !confidentSafe(v, config.threshold))
+            .map((v) => verdictObjection(v, config.threshold, true))
+            .join("; ")
+          : failed.length
+            ? `model unavailable: ${failed[0].error}`
+            : verdicts[0].choice === "unsure"
+              ? `model unsure (${verdicts[0].confidence!.toFixed(2)})`
+              : (verdicts[0].confidence ?? 0) < config.threshold
+                ? `confidence ${(verdicts[0].confidence ?? 0).toFixed(2)} below threshold ${config.threshold}`
+                : `unsafe probability ${(verdicts[0].probabilities?.unsafe ?? 1).toFixed(2)} above the auto-allow bound ${MAX_UNSAFE_PROBABILITY}`);
+
+      const aggregate = (): { classification?: Classification; confidence?: number; probabilities?: Record<string, number> } => {
+        // The most pessimistic classification among the endpoints that
+        // answered: unsafe > unsure > safe.
+        for (const choice of ["unsafe", "unsure", "safe"] as const) {
+          const v = verdicts.find((x) => x.choice === choice);
+          if (v) return { classification: choice, confidence: v.confidence, probabilities: v.probabilities };
+        }
+        return {};
+      };
+      const shown = aggregate();
 
       const outcome = await deps.askOperator({
         tool,
         argsSummary,
-        classification: classification?.choice,
-        confidence: classification?.confidence,
-        probabilities: classification?.probabilities,
+        classification: shown.classification,
+        confidence: shown.confidence,
+        probabilities: shown.probabilities,
+        jury: jury ? verdicts : undefined,
         reason,
       });
 
-      const cause: DecisionSource = failure ? "fail" : "operator";
+      const cause: DecisionSource = configError || failed.length ? "fail" : "operator";
       if (outcome === "no-ui") {
-        return finish({ action: "block", source: cause, reason: `${reason}; no UI available to confirm` });
+        return finish({ action: "block", source: cause, reason: `${reason}; no UI available to confirm`, jury: jury ? verdicts : undefined });
       }
       if (outcome === "deny") {
-        return finish({ action: "block", source: cause, reason: `${reason}; operator denied` });
+        return finish({ action: "block", source: cause, reason: `${reason}; operator denied`, jury: jury ? verdicts : undefined });
       }
-      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed` });
+      return finish({ action: "allow", source: cause, reason: `${reason}; operator allowed`, jury: jury ? verdicts : undefined });
     },
   };
 }

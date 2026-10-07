@@ -19,10 +19,10 @@ function makeDeps(overrides: {
   const deps: GateDeps = {
     home: HOME,
     getConfig: () => ({ ...structuredClone(DEFAULT_CONFIG), ...overrides.config }),
-    classify: async (input) => {
-      classifyCalls.push(input);
+    classify: async (input, endpoint) => {
+      classifyCalls.push({ input, endpoint });
       return (
-        overrides.classify?.(input) ?? {
+        overrides.classify?.(input, endpoint) ?? {
           choice: "safe",
           probabilities: { safe: 0.99, unsafe: 0.005, unsure: 0.005 },
           confidence: 0.98,
@@ -149,8 +149,8 @@ describe("the gate", () => {
     const content = `${"// benign comment line\n".repeat(20)}${secret}\n`;
     await gate.decide({ tool: "write", args: { path: "/tmp/a.js", content }, task: "t" });
     // the model saw at most 100 characters, and the secret sits beyond them
-    expect(classifyCalls[0].args.length).toBeLessThanOrEqual(100);
-    expect(classifyCalls[0].args).not.toContain("hunter2-secret-value");
+    expect(classifyCalls[0].input.args.length).toBeLessThanOrEqual(100);
+    expect(classifyCalls[0].input.args).not.toContain("hunter2-secret-value");
     // the log records the same view plus the total length
     expect(log[0].args).not.toContain("hunter2-secret-value");
     expect(log[0].args).toMatch(/\(\d+ chars\)$/);
@@ -165,8 +165,8 @@ describe("the gate", () => {
     // the truncation bounds exposure; secret-bearing calls are blocked by
     // secrets detection (ADR-0004) before the model — when the corpus does
     // not recognize the shape, this residual is the accepted cost
-    expect(classifyCalls[0].args.length).toBeLessThanOrEqual(100);
-    expect(classifyCalls[0].args).toContain("hunter2-secret-value");
+    expect(classifyCalls[0].input.args.length).toBeLessThanOrEqual(100);
+    expect(classifyCalls[0].input.args).toContain("hunter2-secret-value");
   });
 
   it("state carries only the tool, truncated arguments, task, cwd, and protected paths", async () => {
@@ -175,7 +175,7 @@ describe("the gate", () => {
     });
     const gate = createGate(deps);
     await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "read the file" });
-    const state = classifyCalls[0];
+    const state = classifyCalls[0].input;
     expect(Object.keys(state)).toEqual(["tool", "args", "task", "cwd", "protectedPaths", "policy"]);
     // the gate's own dirs ride along as a backstop (ADR-0003)
     expect(state.protectedPaths).toContain("/home/op/.pi/agent/gate");
@@ -187,11 +187,11 @@ describe("the gate", () => {
     const { deps, classifyCalls } = makeDeps({ classify: async () => classifyResult("safe", 0.9) });
     const gate = createGate(deps);
     await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t", cwd: "/proj" });
-    expect(classifyCalls[0].protectedPaths).toContain("/home/op/.pi/agent/gate");
-    expect(classifyCalls[0].protectedPaths).toContain("/proj/.pi/gate");
+    expect(classifyCalls[0].input.protectedPaths).toContain("/home/op/.pi/agent/gate");
+    expect(classifyCalls[0].input.protectedPaths).toContain("/proj/.pi/gate");
     // the working directory rides along so "outside the project" judgments
     // are decidable against something the model can see
-    expect(classifyCalls[0].cwd).toBe("/proj");
+    expect(classifyCalls[0].input.cwd).toBe("/proj");
   });
 
   it("a safe classification at or above threshold auto-allows", async () => {
@@ -238,6 +238,119 @@ describe("the gate", () => {
     expect(asked[0].reason).toContain("unsafe probability 1.00 above the auto-allow bound 0.1");
     expect(decision.action).toBe("block");
     expect(decision.source).toBe("operator");
+  });
+
+  describe("the endpoint jury (ADR-0006)", () => {
+    const twoEndpoints = {
+      endpoints: [
+        { name: "hermes", url: "http://a/v1/systemone", model: "m1", timeoutMs: 1000, keepAlive: "" },
+        { name: "minerva", url: "http://b/v1/systemone", model: "m2", timeoutMs: 1000, keepAlive: "" },
+      ],
+    };
+
+    function juryDeps(classify: (input: any, endpoint: any) => Promise<ClassificationResult>, overrides: any = {}) {
+      return makeDeps({
+        ...overrides,
+        config: { ...twoEndpoints, ...overrides.config },
+        classify: async (input, endpoint) => classify(input, endpoint),
+      });
+    }
+
+    it("classifies against every endpoint in parallel and waits for all", async () => {
+      const started: string[] = [];
+      const finished: string[] = [];
+      const { deps, classifyCalls } = juryDeps(async (_input, endpoint) => {
+        started.push(endpoint.name);
+        await new Promise((r) => setTimeout(r, 30));
+        finished.push(endpoint.name);
+        return classifyResult("safe", 0.9);
+      });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(classifyCalls).toHaveLength(2);
+      // both start before either finishes — parallel, not sequential
+      expect(started).toEqual(["hermes", "minerva"]);
+      expect(finished).toEqual(["hermes", "minerva"]);
+      expect(decision.action).toBe("allow");
+      expect(decision.source).toBe("model");
+    });
+
+    it("unanimous confident safe auto-allows and logs the per-endpoint verdicts", async () => {
+      const { deps, log } = juryDeps(async (_input, endpoint) =>
+        endpoint.name === "hermes" ? classifyResult("safe", 0.9) : classifyResult("safe", 0.8));
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(decision.action).toBe("allow");
+      expect(decision.reason).toContain("weakest confidence 0.80");
+      expect(log[0].jury).toEqual([
+        { name: "hermes", choice: "safe", confidence: 0.9, probabilities: expect.anything() },
+        { name: "minerva", choice: "safe", confidence: 0.8, probabilities: expect.anything() },
+      ]);
+    });
+
+    it("one confident unsafe veto blocks even when the others say safe", async () => {
+      const { deps } = juryDeps(async (_input, endpoint) =>
+        endpoint.name === "hermes" ? classifyResult("safe", 0.9) : classifyResult("unsafe", 0.71));
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("model");
+      expect(decision.reason).toBe("minerva classified unsafe (0.71)");
+    });
+
+    it("a safe failing the bound on one endpoint asks, naming the objection", async () => {
+      const { deps, asked } = juryDeps(async (_input, endpoint) =>
+        endpoint.name === "hermes"
+          ? classifyResult("safe", 0.9)
+          : { choice: "safe", probabilities: { safe: 0.8, unsafe: 0.15, unsure: 0.05 }, confidence: 0.8 },
+      { askOperator: async () => "deny" });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(asked[0].jury).toHaveLength(2);
+      expect(asked[0].reason).toContain("minerva: unsafe probability 0.15 above the auto-allow bound 0.1");
+      expect(decision.action).toBe("block");
+    });
+
+    it("an unavailable endpoint is pessimistic: asks under failMode ask", async () => {
+      const { deps, asked } = juryDeps(async (_input, endpoint) => {
+        if (endpoint.name === "minerva") throw new Error("connection refused");
+        return classifyResult("safe", 0.9);
+      }, { askOperator: async () => "deny" });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(asked[0].reason).toContain("minerva: unavailable (connection refused)");
+      expect(asked[0].jury?.[1].choice).toBe("unavailable");
+      expect(decision.source).toBe("fail");
+    });
+
+    it("an unavailable endpoint blocks outright under failMode block", async () => {
+      const { deps } = juryDeps(async (_input, endpoint) => {
+        if (endpoint.name === "minerva") throw new Error("connection refused");
+        return classifyResult("safe", 0.9);
+      }, { config: { failMode: "block" } });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("fail");
+      expect(decision.reason).toContain("minerva: unavailable");
+    });
+
+    it("a duplicate resolved name fails closed", async () => {
+      const { deps } = juryDeps(async () => classifyResult("safe", 0.9), {
+        config: {
+          endpoints: [
+            { url: "http://a/v1/systemone", model: "same", timeoutMs: 1000, keepAlive: "" },
+            { url: "http://b/v1/systemone", model: "same", timeoutMs: 1000, keepAlive: "" },
+          ],
+        },
+      });
+      const gate = createGate(deps);
+      const decision = await gate.decide({ tool: "read", args: { path: "/tmp/a" }, task: "t" });
+      expect(decision.action).toBe("block");
+      expect(decision.source).toBe("fail");
+      expect(decision.reason).toContain("gate config error");
+      expect(decision.reason).toContain("duplicate endpoint name");
+    });
   });
 
   it("an unsafe classification at or above threshold auto-blocks", async () => {

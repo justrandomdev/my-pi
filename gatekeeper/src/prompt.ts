@@ -5,6 +5,7 @@
  */
 
 import type { Component } from "@earendil-works/pi-tui";
+import type { JuryVerdict } from "./decision.js";
 
 export type GatePromptResult = "allow" | "deny";
 export type GateClassification = "safe" | "unsafe" | "unsure";
@@ -14,6 +15,9 @@ export interface GatePromptInfo {
   classification?: GateClassification;
   confidence?: number;
   probabilities?: Record<string, number>;
+  /** Per-endpoint verdicts when a jury ran (ADR-0006): one colored row
+   *  per endpoint plus a dim probabilities row each. */
+  jury?: JuryVerdict[];
   reason: string;
   argsSummary: string;
 }
@@ -93,11 +97,29 @@ export function createGatePrompt(info: GatePromptInfo) {
             : `╭─${title.slice(0, inner)}─╮`;
 
         const plain: string[] = [];
+        const rowColor = new Map<string, "success" | "error" | "warning">();
         const classificationPlain = `Classification: ${value}`;
         plain.push(classificationPlain);
-        const entries = Object.entries(info.probabilities ?? {});
-        if (entries.length) {
-          plain.push(`Probabilities: ${entries.map(([k, v]) => `${k} ${v.toFixed(2)}`).join(" · ")}`);
+        // Jury rows (ADR-0006): one colored verdict row per endpoint, a dim
+        // probabilities row under each. Replaces the single-endpoint
+        // probabilities line — the distribution appears per endpoint.
+        for (const v of info.jury ?? []) {
+          const verdict =
+            v.choice === "unavailable"
+              ? `${v.name}: unavailable`
+              : `${v.name}: ${v.choice} ${(v.confidence ?? 0).toFixed(2)}`;
+          rowColor.set(verdict, classificationColor(v.choice === "unavailable" ? undefined : v.choice));
+          plain.push(verdict);
+          const entries = Object.entries(v.probabilities ?? {});
+          if (entries.length) {
+            plain.push(`  ${entries.map(([k, p]) => `${k} ${p.toFixed(2)}`).join(" · ")}`);
+          }
+        }
+        if (!info.jury?.length) {
+          const entries = Object.entries(info.probabilities ?? {});
+          if (entries.length) {
+            plain.push(`Probabilities: ${entries.map(([k, v]) => `${k} ${v.toFixed(2)}`).join(" · ")}`);
+          }
         }
         plain.push(`Reason: ${info.reason}`);
         for (const line of wrap(info.argsSummary, inner - 2)) plain.push(line);
@@ -112,6 +134,8 @@ export function createGatePrompt(info: GatePromptInfo) {
             lines.push(
               `│ ${padded.replace(value, theme.fg(color, theme.bold(value)))} │`,
             );
+          } else if (rowColor.has(text)) {
+            lines.push(`│ ${theme.fg(rowColor.get(text)!, padded)} │`);
           } else if (text.startsWith("a: allow")) {
             lines.push(`│ ${theme.fg("dim", padded)} │`);
           } else if (

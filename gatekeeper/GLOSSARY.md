@@ -16,6 +16,14 @@ _Avoid_: policy, permission
 The decision model's judgment of a call: `safe`, `unsafe`, or `unsure`.
 _Avoid_: verdict, rating
 
+**Jury**:
+Multiple configured endpoints classifying the same call in parallel; the most pessimistic verdict wins, and an unavailable endpoint counts as pessimistic.
+_Avoid_: ensemble, committee, panel
+
+**Endpoint**:
+One Jev/System One-compatible service plus the model it serves; identified by a unique resolved name (defaulting to the model name) shown in the prompt and log.
+_Avoid_: provider, backend
+
 **Confidence**:
 How concentrated the model's probabilities are, from 0 to 1. Not the probability the classification is correct.
 _Avoid_: probability, score

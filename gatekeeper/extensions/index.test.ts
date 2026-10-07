@@ -203,6 +203,94 @@ describe("gatekeeper extension", () => {
     expect(cfg.rules).toBeUndefined(); // no grant was written
   });
 
+  describe("the endpoint jury (ADR-0006)", () => {
+    /** A fetch stub keyed by host: each configured endpoint answers its
+     *  own canned verdict — a disagreeing jury. */
+    function juryFetch(perHost: Record<string, { choice: string; confidence: number }>) {
+      return (async (_url: string | URL, init: RequestInit) => {
+        const host = new URL(String(_url)).host;
+        const canned = perHost[host];
+        void init;
+        if (!canned) throw new Error(`unexpected endpoint ${host}`);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            answers: {
+              safety: {
+                type: "choice",
+                choice: canned.choice,
+                probabilities: { safe: 0.01, unsafe: 0.01, unsure: 0.01, [canned.choice]: canned.confidence },
+                confidence: canned.confidence,
+              },
+            },
+          }),
+        } as Response;
+      }) as typeof fetch;
+    }
+
+    async function jurySetup(endpoints: unknown[]) {
+      await writeFile(
+        join(userHome, ".pi/agent/gate/config.json"),
+        JSON.stringify({ secrets: { autoUpdate: false }, endpoints }),
+      );
+    }
+
+    const twoEndpoints = [
+      { name: "hermes", url: "http://a.example/v1/systemone", model: "m1", timeoutMs: 5000, keepAlive: "" },
+      { name: "minerva", url: "http://b.example/v1/systemone", model: "m2", timeoutMs: 5000, keepAlive: "" },
+    ];
+
+    it("both endpoints classify in parallel and the pessimistic verdict wins", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      const fetchFn = juryFetch({ "a.example": { choice: "safe", confidence: 0.9 }, "b.example": { choice: "unsafe", confidence: 0.71 } });
+      await createGatekeeper(pi, { home: userHome, fetchFn });
+      await jurySetup(twoEndpoints);
+      const result = await runToolCall(captured, env, { type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } });
+      // auto-blocked by minerva's confident unsafe — no operator prompt
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("minerva classified unsafe (0.71)");
+      expect(env.ui.selected).toHaveLength(0);
+    });
+
+    it("the operator prompt shows a jury row per endpoint", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      const fetchFn = juryFetch({ "a.example": { choice: "safe", confidence: 0.9 }, "b.example": { choice: "unsure", confidence: 0.55 } });
+      await createGatekeeper(pi, { home: userHome, fetchFn });
+      await jurySetup(twoEndpoints);
+      let component: any;
+      const ctx = env.ctx();
+      ctx.ui.custom = (async (factory: any) =>
+        new Promise((resolve) => {
+          component = factory({}, { fg: (_c: any, t: any) => t, bold: (t: any) => t } as any, {}, resolve);
+        })) as any;
+      const pending = captured.events.get("tool_call")![0]({ type: "tool_call", toolName: "bash", input: { command: "ls ~/work" } }, ctx);
+      await new Promise((r) => setTimeout(r, 10));
+      const text = (component.render(80) as string[]).join("\n");
+      expect(text).toContain("hermes: safe 0.90");
+      expect(text).toContain("minerva: unsure 0.55");
+      expect(text).toContain("Classification: unsure (0.55)");
+      component.handleInput("n");
+      const result = await pending;
+      expect(result?.block).toBe(true);
+    });
+
+    it("/gate:config test fans the sample call out and lists every verdict", async () => {
+      const { pi, captured } = fakePi();
+      const env = makeEnv();
+      const fetchFn = juryFetch({ "a.example": { choice: "safe", confidence: 0.9 }, "b.example": { choice: "unsafe", confidence: 0.4 } });
+      await createGatekeeper(pi, { home: userHome, fetchFn });
+      await jurySetup(twoEndpoints);
+      const handler = captured.commands.get("gate:config")!.handler;
+      await handler(`test bash '{"command":"ls /tmp"}'`, env.ctx());
+      const line = env.ui.notified.find((n) => n.includes("jury test for bash"));
+      expect(line).toContain("hermes: safe 0.90");
+      expect(line).toContain("minerva: unsafe 0.40");
+    });
+  });
+
   it("gate:rules rm removes exactly the listed rule and preserves the rest", async () => {
     const { pi, captured } = fakePi();
     const env = makeEnv();
@@ -781,7 +869,7 @@ describe("gatekeeper extension", () => {
     );
     const { captured, env } = await setup({ choice: "safe", confidence: 0.9 });
     await runToolCall(captured, env, { type: "tool_call", toolName: "read", input: { path: "/tmp/a" } });
-    const dump = env.ui.notified.find((n) => n.includes("gate › debug — model request:"));
+    const dump = env.ui.notified.find((n) => n.includes("gate › debug [clef-flash] — model request:"));
     expect(dump).toBeDefined();
     // the exact request body: state with tool/arguments/cwd, questions, model
     expect(dump).toContain('"model":"clef-flash"');
@@ -789,7 +877,7 @@ describe("gatekeeper extension", () => {
     expect(dump).toContain('"cwd":"');
     expect(dump).toContain('"questions"');
     // the answer the gate acted on
-    expect(dump).toContain("gate › debug — model answer:");
+    expect(dump).toContain("gate › debug [clef-flash] — model answer:");
     expect(dump).toContain('"choice":"safe"');
     expect(dump).toContain('"probabilities"');
     expect(dump).toContain('"confidence":0.9');

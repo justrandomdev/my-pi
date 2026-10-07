@@ -11,7 +11,7 @@ Every tool call passes through the gate, in order:
 1. **Self-protection** — calls touching the gate's own config, log, or secrets definitions are always denied, `realpath`-resolved so symlink chains are caught too. Not overridable by any rule. See [ADR-0003](docs/adr/0003-the-gate-protects-itself.md).
 2. **Secrets detection** — the gitleaks corpus (~220 rules, compiled to a JS regex subset) scans the full command and file contents. A hit blocks before every rule and the model, masked (`sk-…(51 chars)`), overridable only by your `secrets.toml`. See [ADR-0004](docs/adr/0004-deterministic-secret-detection.md).
 3. **Rules** — ordered allow/deny entries (project rules first, then user, then shipped defaults). First hit wins; a fast-path, not a guard.
-4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator.
+4. **The model gate** — a Jev/System One-compatible decision model (default: local Ollama `clef-flash`) classifies the call `safe`, `unsafe`, or `unsure` with a confidence score. **The model is the primary classifier** ([ADR-0005](docs/adr/0005-the-decision-model-is-the-primary-classifier.md)): `safe` ≥ threshold **and** an unsafe probability ≤ 0.1 (a fixed bound) → auto-allow (any tool); `unsafe` ≥ threshold → auto-block; everything else → operator. With several `endpoints` configured, a **jury** runs instead ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)): every endpoint classifies in parallel, the gate waits for all, and the most pessimistic verdict wins — one dissenting `unsafe` blocks, auto-allow needs unanimity.
 5. **The operator** — a bordered prompt (classification and probabilities colored green/red/yellow) with `a: allow · n/esc: deny`. Nothing persists from a prompt; persistent allows are explicit rules.
 
 Model failure or timeout routes to the operator (`failMode: ask`) or blocks (`failMode: block`, for headless use).
@@ -56,6 +56,10 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
   "policy": "…what counts as unsafe…",
   "failMode": "ask",
   "stateBudgetChars": 4000,
+  "endpoints": [
+    { "name": "hermes", "url": "http://localhost:11434/v1/systemone", "model": "clef-flash", "timeoutMs": 30000, "keepAlive": "10m" },
+    { "url": "https://jev.example.com/v1/systemone", "model": "clef-24b", "apiKey": "…" }
+  ],
   "log": {
     "level": "user",
     "maxLines": 10000,
@@ -78,9 +82,10 @@ Both files are optional; missing keys fall through to defaults. A shipped skill 
 | `threshold` | `0.65` | Minimum confidence for autonomous allow/block. Auto-allow additionally requires the model's unsafe probability ≤ 0.1 (a fixed bound, not configurable). Below either: operator. |
 | `endpoint.url` | `http://localhost:11434/v1/systemone` | Full request URL of a Jev/System One-compatible service — the gate POSTs here verbatim. |
 | `endpoint.model` | `clef-flash` | Any model the endpoint serves (`clef`, a remote Jev, …). |
-| `endpoint.apiKey` | — | Bearer token for remote services. Set this by manual edit only — the `set` command echoes values into notifications. |
+| `endpoint.apiKey` | — | Bearer token for remote services. Settable via `set` (the echoed value is redacted as `***`); nothing else echoes it. |
 | `endpoint.timeoutMs` | `30000` | Cold-start load of a large local model takes tens of seconds; warm calls are sub-second. |
 | `endpoint.keepAlive` | `"10m"` | Ollama-only; keeps the model warm between calls. Set `""` for strict endpoints (e.g. Cloudflare) that reject extra fields. |
+| `endpoints` | — | The endpoint **jury** ([ADR-0006](docs/adr/0006-the-endpoint-jury-runs-most-pessimistic.md)): an array of `{ name?, url, model, apiKey?, timeoutMs?, keepAlive? }` entries. Each entry is a self-contained endpoint; `name` defaults to `model` and resolved names must be unique (a duplicate is a config error, never an auto-rename). When present it replaces `endpoint` entirely: all entries classify each call in parallel, the gate waits for every answer, and the most pessimistic verdict wins — any confident `unsafe` auto-blocks, auto-allow needs every endpoint confident `safe` with an unsafe probability ≤ 0.1. An unavailable endpoint counts as pessimistic (`failMode` decides ask vs block). Per-call cost and latency scale with the jury — an evaluation rig, not a permanent posture. |
 | `policy` | built-in text | What counts as unsafe — sent to the model as classification instructions. |
 | `failMode` | `"ask"` | Model down/timeout: `"ask"` routes to the operator, `"block"` denies (headless). |
 | `stateBudgetChars` | `4000` | Character cap on the **task text** the model sees; arguments are capped to a fixed 100 characters (ADR-0002/0005). |
@@ -141,7 +146,7 @@ The scan covers the full `bash`/`powershell` command and the full serialized arg
 
 ### The decision log
 
-`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length; a secrets block logs a constant in the args column — a detected secret never lands in this log), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. Full file contents never reach the model state (ADR-0002) or this log — but a short secret the corpus misses, inside the first 100 characters of a command, is an argument and does land here.
+`decisions.jsonl` (plus rotated `.1`, `.2`, …) — one JSON line per decision: timestamp, tool, the same first-100-character argument view the model saw (plus the total length; a secrets block logs a constant in the args column — a detected secret never lands in this log), action, source (`rule` / `model` / `operator` / `fail` / `protected` / `secrets` / `disabled`), classification, confidence, and the reason. A jury run attaches the per-endpoint verdicts as a `jury` array (`name`, `choice`, `confidence`, `probabilities`; an unavailable endpoint is recorded as such). Full file contents never reach the model state (ADR-0002) or this log — but a short secret the corpus misses, inside the first 100 characters of a command, is an argument and does land here.
 
 ## Slash commands
 
@@ -149,7 +154,7 @@ All commands are operator-run; the agent cannot invoke them.
 
 ### `/gate` — status
 
-Shows the effective posture: enabled, endpoint (model @ url), threshold, fail mode, secrets engine (rules active, last update), rule count, active log path, and session statistics.
+Shows the effective posture: enabled, the endpoint(s) (`name @ url` — the jury members when configured), threshold, fail mode, secrets engine (rules active, last update), rule count, active log path, and session statistics.
 
 ### `/gate:secrets` — the secrets engine
 
@@ -181,12 +186,14 @@ The auto-update runs in the background on start and reports only on change or fa
 /gate:config set endpoint.model clef            dotted endpoint keys
 /gate:config set endpoint.url https://…
 /gate:config set endpoint.timeoutMs 60000
+/gate:config set endpoints.hermes.url https://…  set a field on a jury member (addressed by resolved name)
+/gate:config test bash '{"command":"ls /tmp"}'   fan the sample call out to every endpoint, list verdicts
 /gate:config set secrets.autoUpdate false     stop the background auto-update
 /gate:config set log.level project              log into the repo
 /gate:config set threshold 0.8 --project        project-level override (ADR-0001)
 ```
 
-`endpoint.apiKey` is deliberately manual-edit-only — the command echoes values into notifications.
+`endpoint.apiKey` is settable via `set` — the echoed value is redacted as `***`, so the key never lands in a notification (the one you typed it in is, of course, yours to clear).
 
 ### `/gate:log` — review decisions
 

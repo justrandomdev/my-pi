@@ -8,12 +8,12 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { configPaths, DEFAULT_CONFIG, resolveConfig, type DeepPartial, type GatekeeperConfig, type ScopedConfig } from "../src/config.js";
-import { createSystemOneClassifier } from "../src/classifier.js";
+import { configPaths, DEFAULT_CONFIG, resolveConfig, resolveEndpoints, type DeepPartial, type EndpointConfig, type GatekeeperConfig, type NamedEndpoint, type ScopedConfig } from "../src/config.js";
+import { createSystemOneClassifier, type ClassifyInput } from "../src/classifier.js";
 import { createGate, type GateDeps, type OperatorPromptInfo } from "../src/decision.js";
 import { DecisionLog } from "../src/log.js";
 import { createGatePrompt, type GatePromptResult } from "../src/prompt.js";
-import { argsText, matchRules, type Rule } from "../src/rules.js";
+import { argsText, gateDirs, matchRules, protectedPatterns, type Rule } from "../src/rules.js";
 import { compileSecrets, compileUserSecrets, scanSecrets, type CompiledSecrets, type SecretsHit, type SecretsOverride } from "../src/secrets.js";
 
 export interface GatekeeperOptions {
@@ -303,6 +303,7 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
             classification: prompt.classification,
             confidence: prompt.confidence,
             probabilities: prompt.probabilities,
+            jury: prompt.jury,
             reason: prompt.reason,
             argsSummary: prompt.argsSummary,
           }),
@@ -312,16 +313,20 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       }
     }
     // …and the plain selector everywhere else (RPC, print).
+    const verdictRows = prompt.jury?.map((v) =>
+      v.choice === "unavailable" ? `  ${v.name}: unavailable` : `  ${v.name}: ${v.choice} ${(v.confidence ?? 0).toFixed(2)}`,
+    );
     const detail =
       (prompt.classification
         ? `Classification: ${prompt.classification} (confidence ${prompt.confidence?.toFixed(2)})`
         : "") +
-      (prompt.probabilities && Object.keys(prompt.probabilities).length
+      (!prompt.jury?.length && prompt.probabilities && Object.keys(prompt.probabilities).length
         ? ` — probabilities: ${Object.entries(prompt.probabilities)
           .map(([k, v]) => `${k} ${v.toFixed(2)}`)
           .join(", ")}`
         : "") +
       (prompt.classification ? "\n" : "") +
+      (verdictRows?.length ? [...verdictRows, ""].join("\n") : "") +
       `Reason: ${prompt.reason}\n` +
       `Arguments: ${prompt.argsSummary}`;
     ctx.ui.notify(`gate › ${prompt.tool}\n${detail}`, "warning");
@@ -401,7 +406,11 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
     await mkdir(join(path, ".."), { recursive: true });
     await writeFile(path, `${JSON.stringify(scoped[level], null, 2)}\n`, "utf8");
     mtimeCache.delete(path);
-    effective = resolveConfig(await readScoped(currentCtx?.isProjectTrusted() ?? false, cwd));
+    // Re-resolve with the same trust the write just used (the caller's ctx
+    // when supplied, else the session's) — `currentCtx` alone may be
+    // undefined, which would drop a just-written project config from
+    // `effective` until the next refresh.
+    effective = resolveConfig(await readScoped(trusted, cwd));
   }
 
   // Load the secrets engine and run the background auto-update (ADR-0004).
@@ -415,14 +424,16 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
   const deps: GateDeps = {
     home,
     getConfig: () => effective,
-    classify: (input) =>
-      createSystemOneClassifier(effective.endpoint, fetchFn, {
+    classify: (input, endpoint) =>
+      createSystemOneClassifier(endpoint, fetchFn, {
         // Debug (notify: "debug"): the exact request body posted and the
-        // answer the gate acted on, one dump per classification.
+        // answer the gate acted on, one dump per classification, prefixed
+        // with the endpoint's resolved name so jury exchanges stay
+        // attributable (ADR-0006).
         onExchange: (request, answer) => {
           if (effective.notify !== "debug") return;
           currentCtx?.ui.notify(
-            `gate › debug — model request: ${JSON.stringify(request)}\ngate › debug — model answer: ${JSON.stringify(answer)}`,
+            `gate › debug [${endpoint.name}] — model request: ${JSON.stringify(request)}\ngate › debug [${endpoint.name}] — model answer: ${JSON.stringify(answer)}`,
             "info",
           );
         },
@@ -487,9 +498,16 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
       const secretsLine = snapshotRules
         ? `${snapshotRules.rules.length}/${snapshotRules.total} gitleaks rules active (${snapshotRules.skipped} skipped) + ${userPart.rules.length} user, last update: ${secretsLastUpdate}`
         : "unavailable";
+      const endpoints = (() => {
+        try {
+          return resolveEndpoints(effective);
+        } catch (error) {
+          return [{ name: "(config error)", url: (error as Error).message, model: "", timeoutMs: 0, keepAlive: "" } as never];
+        }
+      })();
       const lines = [
         `Gatekeeper ${effective.enabled ? "enabled" : "disabled"}`,
-        `Endpoint: ${effective.endpoint.model} @ ${effective.endpoint.url}`,
+        `Endpoints: ${endpoints.map((e) => `${e.name} @ ${e.url}`).join(", ")}`,
         `Threshold: ${effective.threshold} | Fail mode: ${effective.failMode}`,
         `Secrets: ${effective.secrets.enabled ? secretsLine : "off"}`,
         `Rules: ${effective.rules.length} (incl. shipped defaults) | Log: ${logDir(ctx.cwd)}`,
@@ -591,10 +609,52 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
   });
 
   pi.registerCommand("gate:config", {
-    description: "Show config, or set <key> <value> [--project]",
+    description: "Show config, set <key> <value> [--project], or test <tool> [json-args] — jury comparison across all endpoints",
     handler: async (args: string, ctx: AnyCtx) => {
       await refreshConfig(ctx);
       const { level, parts: clean } = parseCmdArgs(args);
+
+      if (clean[0] === "test" && clean[1]) {
+        const tool = clean[1];
+        let callArgs: Record<string, unknown> = {};
+        try {
+          callArgs = clean[2] ? (JSON.parse(clean[2]) as Record<string, unknown>) : {};
+        } catch {
+          ctx.ui.notify(`gate › arguments are not valid JSON: ${clean[2]}`, "error");
+          return;
+        }
+        // Jury comparison (ADR-0006): fan the same sample call out to every
+        // endpoint in parallel and print the verdicts side by side. Pure
+        // classification — no gate decision, nothing logged.
+        let endpoints: NamedEndpoint[];
+        try {
+          endpoints = resolveEndpoints(effective);
+        } catch (error) {
+          ctx.ui.notify(`gate › ${(error as Error).message}`, "error");
+          return;
+        }
+        const input: ClassifyInput = {
+          tool,
+          args: JSON.stringify(callArgs).slice(0, 100),
+          task: currentTask,
+          cwd: ctx.cwd,
+          protectedPaths: [...gateDirs(home, ctx.cwd), ...protectedPatterns(effective.rules)],
+          policy: effective.policy,
+        };
+        const rows = await Promise.all(
+          endpoints.map(async (endpoint) => {
+            try {
+              const r = await createSystemOneClassifier(endpoint, fetchFn).classify(input);
+              const probabilities = Object.entries(r.probabilities).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ");
+              return `  ${endpoint.name}: ${r.choice} ${r.confidence.toFixed(2)}${probabilities ? ` (${probabilities})` : ""}`;
+            } catch (error) {
+              return `  ${endpoint.name}: unavailable (${(error as Error).message})`;
+            }
+          }),
+        );
+        ctx.ui.notify([`gate › jury test for ${tool}:`, ...rows].join("\n"), "info");
+        return;
+      }
 
       if (clean[0] === "set" && clean[1] && clean[2] !== undefined) {
         const [, key, ...rest] = clean;
@@ -604,6 +664,47 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
         // brick the gate until a manual edit.
         if (key === "rules") {
           ctx.ui.notify(`gate › rules cannot be set here — use gate:rules add/rm`, "warning");
+          return;
+        }
+        // Endpoint-jury entries (ADR-0006): set endpoints.<name>.<field>.
+        // Addressed by resolved name (the entry's `name`, or its `model`
+        // when unnamed); the entry must already exist — the jury is
+        // configured by a manual edit of the endpoints array.
+        const entryMatch = key.match(/^endpoints\.(.+)\.(url|model|apiKey|timeoutMs|keepAlive)$/);
+        if (entryMatch) {
+          const [, entryName, field] = entryMatch;
+          const scoped = await readScoped(ctx.isProjectTrusted(), ctx.cwd);
+          const entry = (scoped[level]?.endpoints ?? []).find(
+            (e) => (e.name ?? (e as EndpointConfig).model) === entryName,
+          );
+          if (!entry) {
+            const known = resolveEndpoints(effective).map((e) => e.name).join(", ");
+            ctx.ui.notify(`gate › no endpoint named "${entryName}" (endpoints: ${known || "none"})`, "warning");
+            return;
+          }
+          const validators: Record<string, (v: unknown) => string | undefined> = {
+            url: isNonEmptyString,
+            model: isNonEmptyString,
+            apiKey: isString,
+            timeoutMs: isPositiveInt,
+            keepAlive: isString,
+          };
+          const parsed = field === "timeoutMs" ? Number(value) : value;
+          const invalid = validators[field](parsed);
+          if (invalid) {
+            ctx.ui.notify(`gate › ${key} ${invalid}, got "${value}"`, "warning");
+            return;
+          }
+          await writeScoped(level, (s) => {
+            // find inside the read-modify-write: writeScoped re-reads the
+            // scoped config, so the outer reference would be stale
+            const entry = (s.endpoints ?? []).find(
+              (e) => (e.name ?? (e as EndpointConfig).model) === entryName,
+            );
+            if (entry) (entry as Record<string, unknown>)[field] = parsed;
+          }, ctx.cwd, ctx);
+          const echo = field === "apiKey" ? "***" : value;
+          ctx.ui.notify(`gate › set ${key} = ${echo} at ${level} level`, "info");
           return;
         }
         const validator = CONFIG_KEYS[key];
@@ -664,7 +765,9 @@ export function createGatekeeper(pi: ExtensionAPI, options: GatekeeperOptions = 
           `gate › effective config (defaults < user < project):`,
           `enabled: ${effective.enabled}`,
           `threshold: ${effective.threshold}`,
-          `endpoint: ${effective.endpoint.url} (${effective.endpoint.model})`,
+          ...(effective.endpoints?.length
+            ? effective.endpoints.map((e, i) => `endpoint ${i + 1}: ${e.name ?? e.model} @ ${e.url} (${e.model})`)
+            : [`endpoint: ${effective.endpoint.url} (${effective.endpoint.model})`]),
           `failMode: ${effective.failMode} | notify: ${effective.notify}`,
           `secrets: ${effective.secrets.enabled ? "enabled" : "off"} | autoUpdate: ${effective.secrets.autoUpdate}`,
           `log: level=${effective.log.level} maxLines=${effective.log.maxLines} keepFiles=${effective.log.keepFiles} retentionDays=${effective.log.retentionDays}`,

@@ -27,3 +27,5 @@ The decision matrix has since been tuned, with the operator's approval:
 - The lower threshold also lowers the auto-block bar: an `unsafe` at 0.65 confidence now auto-blocks where it previously asked — fail-closed, but more blocking.
 
 The containment story is otherwise unchanged: deterministic layers ahead of the model, plus the threshold and the probability bound. Ask floors and the session cache remain removed.
+
+With more than one configured endpoint the single-judge matrix becomes a jury — most-pessimistic aggregation, one unavailable endpoint counts as pessimistic — recorded in [ADR-0006](0006-the-endpoint-jury-runs-most-pessimistic.md).
