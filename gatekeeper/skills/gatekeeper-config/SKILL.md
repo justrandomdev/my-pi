@@ -1,46 +1,42 @@
 ---
 name: gatekeeper-config
-description: Explains how the operator configures the pi gatekeeper plugin — rules, threshold, ask floors, model endpoint, decision log. Use when the user asks about configuring or tuning gatekeeper, asks why a call was gated or blocked, or wants a gate setting changed.
+description: Explains how the operator configures the pi gatekeeper plugin — rules, threshold, model endpoint, decision log. Use when the user asks about configuring or tuning gatekeeper, asks why a call was gated or blocked, or wants a gate setting changed.
 ---
 
 # Gatekeeper configuration guidance
 
-You cannot configure gatekeeper, and you cannot read its config, decision log, or secrets definitions: every agent tool call touching them is always denied, before any rule (self-protection). Do not attempt edits, reads, or shell workarounds — they are always blocked, including attempts to allow them. Your job here is to explain to the operator how to configure it themselves, with the reference below.
+You can never touch gatekeeper itself: every agent tool call on its config, decision log, or secrets rules is denied before any rule. Never attempt edits, reads, or shell workarounds. Your job is to tell the operator how to configure it.
 
-Configuration is done two ways: **slash commands** (operator-run — type them yourself; the agent cannot invoke them) and **manual edits** of the config JSON by the operator.
+Two ways to configure, both operator-only: **slash commands** (below — the agent cannot invoke them) and **manual JSON edits**.
 
-## Slash commands (primary — tell the user these)
+## Slash commands
 
-- `/gate` — status: effective posture (endpoints, multi-endpoint mode, threshold, floors, fail mode), rule count, log path, session statistics. With multi-endpoint configs set, it also selects the jury member `modelSelect` serves:
-  - `/gate model` — list the configured endpoints and who is serving
-  - `/gate model <name>` — select the endpoint `modelSelect` serves, persisted at user level (`--project` supported); unknown name → warning with the candidates
-- `/gate:rules` — list, add, remove, and test rules:
-  - `/gate:rules` (list; shows project `p*`, user `u*`, then shipped defaults)
-  - `/gate:rules add allow "ls ?*"` — user-level allow rule; `add deny "~/creds"` for a protected path
-  - `--tool bash` scopes a rule to one tool; `--project` writes it at project level
-  - `/gate:rules rm u2` removes user rule #2 as listed; `rm p1` removes a project rule
-  - `/gate:rules test bash '{"command":"ls /tmp"}'` shows which rule a sample call hits
-- `/gate:config` — show effective config, or set keys:
-  - `/gate:config set threshold 0.9` — confidence threshold for autonomous allow/block (auto-allow also requires the model's unsafe probability ≤ 0.1, a fixed bound)
-  - `endpoint.model`, `endpoint.url` (full request URL), `endpoint.timeoutMs` — switch between local clef-flash, larger clef, or remote Jev endpoints
-  - `endpoints.<name>.url` / `.model` / `.timeoutMs` — set a field on a jury member (ADR-0006) by its resolved name; the entries themselves are configured by a manual edit of the `endpoints` array
-  - `multiEndpointMode` — `modelSelect` (default) | `jury` | `fallback` (ADR-0007): how multiple endpoints act. To resume ADR-0006 model evaluation, `/gate:config set multiEndpointMode jury`. To serve only the first entry when a judge is down, `/gate:config set multiEndpointMode fallback`. An invalid value is a config error, never silently defaulted
-  - `selectedEndpoint` — the endpoint `modelSelect` serves by resolved name (`/gate model <name>` is the friendlier path)
-  - `/gate:config test bash '{"command":"ls /tmp"}'` — fan the sample call out to every configured endpoint and list the verdicts side by side (jury comparison)
-  - `secrets.enabled`, `secrets.autoUpdate`, `secrets.source` — the deterministic secrets engine
-  - `log.level`, `log.maxLines`, `log.keepFiles`, `log.retentionDays` — decision-log behavior
-  - append `--project` to set at project level (project overrides user per key)
-- `/gate:secrets` — the secrets engine: status (rules active, source, last update), `update` (force a refresh), `test "<text>"` (which rule matches a sample string, masked). A secret-shaped tool call of yours will be blocked before the model with the rule id — if it is a false positive (a fake key in a test fixture, for example), the operator suppresses it in `~/.pi/agent/gate/secrets.toml` (`[[allow]]` with the rule id and a `path`), never by weakening the rules.
-- `/gate:log` — review decisions: `/gate:log 50 bash` tails the last 50 bash decisions. Use this to investigate why a call was allowed, blocked, or asked.
+- `/gate` — status: endpoints, multi-endpoint mode, threshold, fail mode, rule count, log path, session stats.
+  - `/gate model` — list endpoints and who the decision model (`modelSelect`) is serving.
+  - `/gate model <name>` — select the endpoint `modelSelect` serves; persisted, user level (`--project` ok); unknown name → warning with the candidates.
+- `/gate:rules` — list (project `p*`, user `u*`, then shipped defaults) / `add` / `rm` / `test`:
+  - `add allow "ls ?*"`; `add deny "~/creds"`; `--tool bash` scopes to one tool; `--project` writes project level
+  - `rm u2` = user rule #2 as listed; `rm p1` = project rule
+  - `test bash '{"command":"ls /tmp"}'` — which rule a sample call hits
+- `/gate:config` — show effective config; `set <key> <value> [--project]` (project overrides user per key):
+  - `threshold 0.9` — confidence for autonomous allow/block (auto-allow also always requires unsafe probability ≤ 0.1, a fixed bound)
+  - `endpoint.model/.url/.timeoutMs` — single endpoint (full request URL; e.g. local clef-flash vs remote Jev)
+  - `endpoints.<name>.url/.model/.timeoutMs` — one jury member by resolved name; the `endpoints` array itself is manual-edit only
+  - `multiEndpointMode` — `modelSelect` (default) | `jury` | `fallback` (ADR-0007); invalid value is a config error, never a silent default
+  - `selectedEndpoint` — endpoint `modelSelect` serves (`/gate model <name>` is the friendlier path)
+  - `notify` — `always` (default) | `summary` (blocks/asks only) | `off` | `debug` (also dumps the full model request/answer per classification); decision log unaffected
+  - `secrets.enabled/.autoUpdate/.source` — secrets engine
+  - `log.level/.maxLines/.keepFiles/.retentionDays` — decision log
+  - `test bash '{"command":"ls /tmp"}'` — fan the sample out to every endpoint, verdicts side by side
+  - `endpoint.apiKey` is settable; the echo is redacted (`***`)
+- `/gate:secrets` — status (rules active, source, last update), `update` (force refresh), `test "<text>"` (matching rule, masked). False positive → operator adds `[[allow]]` (rule id + optional `path`) in `~/.pi/agent/gate/secrets.toml`; never weaken the rules.
+- `/gate:log [n] [tool]` — tail recent decisions, e.g. `/gate:log 50 bash`.
 
-Note: `endpoint.apiKey` is settable via `set` — the echoed value is redacted as `***`, so the key never lands in a notification.
+When the user asks why a call was gated: point them to the session's transparency line and `/gate:log` — classification, confidence, and reason (below-threshold, unsafe-probability bound, deny rule, or model failure).
 
-## Manual configuration (secondary)
+## Manual configuration
 
-- User level: `~/.pi/agent/gate/config.json` — safe defaults, applies everywhere.
-- Project level: `.pi/gate/config.json` in the repo — read only after project trust is granted; overrides user per key.
-- Secrets: `~/.pi/agent/gate/gitleaks.toml` (machine-managed snapshot — auto-updated, do not edit) and `~/.pi/agent/gate/secrets.toml` (the operator's own rules and false-positive suppressions — the updater never touches it). Both live where agent tool calls are always denied.
-
-Full schema with defaults and rule-matching semantics: the package README (`gatekeeper/README.md`), sections "Manual configuration" and "Rules".
-
-When the user asks why a call was gated: the transparency line in the session and `/gate:log` give the classification, confidence, and the reason (below-threshold, unsafe-probability bound, deny rule, or model failure) — walk them through it.
+- `~/.pi/agent/gate/config.json` — user level.
+- `.pi/gate/config.json` — project level; read only after project trust; overrides user per key.
+- `~/.pi/agent/gate/gitleaks.toml` — machine-managed snapshot, never edit; `secrets.toml` — operator's own, the updater never touches it.
+- Full schema, defaults, rule semantics: `gatekeeper/README.md` ("Manual configuration", "Rules").

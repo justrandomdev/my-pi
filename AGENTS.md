@@ -9,7 +9,7 @@
 
 ## What this repo is
 
-A monorepo of plugins for the [pi coding harness](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`), each making pi easier to work with or more useful.
+A monorepo of pi plugins and agent skills. Plugins target the [pi coding harness](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`), each making pi easier to work with or more useful. Agent skills live in `skills/<name>/SKILL.md` (one skill per directory, not related to any plugin) and are installed to agent skill dirs by the Vercel `skills` CLI — `npx skills add ./skills` — tracked in `skills-lock.json`. Every skill added there must also be listed in `skills/README.md`; the README is the human-facing catalog of the skills repo.
 
 **Token efficiency is a hard design constraint.** A plugin that inflates context, attention, or output spend is a regression even when the feature works:
 - Prefer on-demand material (commands, tools) over always-loaded context — every always-on cost justifies itself.
@@ -21,7 +21,7 @@ Authoritative harness docs: `$(npm root -g)/@earendil-works/pi-coding-agent/docs
 
 ## Plugin conventions
 
-- One plugin per top-level directory, as a standard pi package (conventional `extensions/`/`skills/`/`prompts/`/`themes/` dirs or a `pi` manifest — `packages.md`).
+- One plugin per top-level directory (outside `skills/`), as a standard pi package (conventional `extensions/`/`skills/`/`prompts/`/`themes/` dirs or a `pi` manifest — `packages.md`).
 - Extensions are plain TypeScript (jiti — no build step); don't add bundlers or compilers.
 - Extensions run with the user's permissions — no network, filesystem, or subprocess access beyond the plugin's function.
 
@@ -39,4 +39,4 @@ Every plugin change ends verified: load it with `pi -e` and exercise the feature
 
 ## Gotchas
 
-- `.agents/skills/` is vendored from upstream sources via `skills-lock.json`; `.pi/skills/` and `.claude/skills/` are symlinks into it. Don't hand-edit anything under those three paths — changes belong at the upstream source and will be overwritten on the next sync.
+- `.agents/skills/` is populated by the Vercel `skills` CLI: upstream skills are vendored via `skills-lock.json`, and repo-owned skills are copied in from `skills/`. Pi scans `.agents/skills/` natively; `.pi/skills/` and `.claude/skills/` are symlinks into it. Don't hand-edit anything under those three paths — upstream changes belong at the upstream source, and repo skills are edited in `skills/` then re-synced with `npx skills update -y`.

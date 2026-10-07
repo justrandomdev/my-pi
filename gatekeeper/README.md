@@ -40,6 +40,133 @@ Config lives in two levels (JSON):
 
 Both files are optional; missing keys fall through to defaults. A shipped skill (`gatekeeper-config`) tells agents how to explain all of this to you — the agent cannot edit these files itself.
 
+### Example starter user-level config
+
+Copy to `~/.pi/agent/gate/config.json` and fill in the two `<api-key>` placeholders:
+
+```json
+{
+  "threshold": 0.65,
+  "rules": [
+    {
+      "action": "deny",
+      "pattern": "~/.zshrc"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.bashrc"
+    },
+    {
+      "action": "deny",
+      "pattern": "/etc/passwd"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.ssh/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.gnupg/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.aws/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.config/gcloud/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.azure/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.kube/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.netrc"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.git-credentials"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.npmrc"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.pypirc"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.docker/config.json"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.config/gh/hosts.yml"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.vault-token"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.mozilla/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.config/google-chrome/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "~/.config/chromium/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "/etc/shadow"
+    },
+    {
+      "action": "deny",
+      "pattern": "/etc/sudoers"
+    },
+    {
+      "action": "deny",
+      "pattern": "/etc/sudoers.d/**"
+    },
+    {
+      "action": "deny",
+      "pattern": "/etc/ssh/**"
+    },
+    {
+      "action": "deny",
+      "pattern": ".env"
+    },
+    {
+      "action": "allow",
+      "pattern": "pi -*?"
+    }
+  ],
+  "endpoints": [
+    {
+      "name": "jev",
+      "apiKey": "<api-key>",
+      "url": "https://openrouter.ai/api/alpha/decisions",
+      "model": "~typesafe/jev-latest"
+    },
+    {
+      "name": "clef",
+      "apiKey": "<api-key>",
+      "url": "https://api.cloudflare.com/client/v4/accounts/4d987d1447eed46b1afa14c9b441601e/ai/run/@cf/cloudflare/clef",
+      "model": "clef"
+    }
+  ],
+  "notify": "always"
+}
+```
+
 ### Schema
 
 ```json
@@ -203,6 +330,7 @@ The auto-update runs in the background on start and reports only on change or fa
 /gate:config test bash '{"command":"ls /tmp"}'   fan the sample call out to every endpoint, list verdicts — comparison regardless of mode
 /gate:config set secrets.autoUpdate false     stop the background auto-update
 /gate:config set log.level project              log into the repo
+/gate:config set notify summary                 transparency line: always / summary / off / debug
 /gate:config set threshold 0.8 --project        project-level override (ADR-0001)
 ```
 
