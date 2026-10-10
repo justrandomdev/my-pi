@@ -13,13 +13,15 @@ If `HERDR_ENV=1` is unset, stop and tell the user you must be inside a Herdr pan
 
 Delegate when the work is genuinely parallel, wants its own clean context (a reviewer of a diff you just wrote), or is bulk mechanical work. Do it myself when it needs this conversation's context or is a single small edit — coordination then costs more than the work.
 
-Name the kind and model per agent, and ask the user before going past two agents.
+Ask the user before going past two agents, and surface any substitution of a persona's model as a decision for them rather than making it silently.
 
 ## Personas
 
-- **Planner** — requirements in, step-by-step Markdown checklist out, no code.
-- **Builder** — checklist in, working code out, with the repo's checks run.
-- **Reviewer** — file or diff in, actionable findings out with evidence quoted, no rewrites.
+Each persona has a fixed pi model, all through the `opencode-go` provider:
+
+- **Planner** — requirements in, step-by-step Markdown checklist out, no code. `opencode-go/glm-5.2`.
+- **Builder** — checklist in, working code out, with the repo's checks run. `opencode-go/deepseek-v4.1-flash`.
+- **Reviewer** — file or diff in, actionable findings out with evidence quoted, no rewrites. `opencode-go/minimax-m3`.
 
 ## Lifecycle
 

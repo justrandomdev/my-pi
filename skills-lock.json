@@ -73,6 +73,11 @@
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
       "computedHash": "ac2c94885f34ff8492dc12aa4543182f661f32ea1722b8d6b6c2c7045af33ae3"
     },
+    "init": {
+      "source": "./skills",
+      "sourceType": "local",
+      "computedHash": "e9e2ee1f843b29aa86cf30ae712fcb3b3a90deaf8bdf20c21a171943a2406750"
+    },
     "pr": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -106,7 +111,7 @@
     "subagent-orchestrator": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "8aec44281208bbb46c1e1fb8b3bc1a843c033e8d0a7e33e656c272b729db386d"
+      "computedHash": "c96cdae4f84a02d6d1599320d3823360f030190ee7ff2a967e662c9b634f5bab"
     },
     "tdd": {
       "source": "mattpocock/skills",
@@ -160,7 +165,7 @@
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/wizard/SKILL.md",
-      "computedHash": "3642db2041d66efa88407e958792268c5cace9e286ad0a93ae218bffc8aae448"
+      "computedHash": "49298bed80e7f722b071ad5d64798c75eb705bbbe0635b9bbffd08cd6fb81647"
     },
     "writing-for-agents": {
       "source": "mattpocock/skills",

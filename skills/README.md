@@ -4,6 +4,16 @@ Agent skills for this repo, managed with the [Vercel skills CLI](https://github.
 
 A skill is a directory with a `SKILL.md` containing YAML frontmatter (`name`, `description`) followed by instructions the agent loads on demand.
 
+## Bootstrap a new repo
+
+The [`init`](./init/SKILL.md) skill scaffolds any repo for agentic coding — it interviews you, then writes AGENTS.md, CLAUDE.md, README.md, and .gitignore, and installs the required pi extensions:
+
+```bash
+npx skills add justrandomdev/my-pi/skills -s init
+```
+
+Optional companion: install the `wizard` skill first (`npx skills add mattpocock/skills -s wizard`) and `init` will use it to walk you through the Tavily API key entry.
+
 ## Managing skills
 
 ```bash
@@ -36,4 +46,5 @@ It also needs to run inside a Herdr pane (`HERDR_ENV=1`). Without the skill inst
 
 | Skill | Description |
 |-------|-------------|
+| [init](./init/SKILL.md) | Bootstrap a repo for agentic coding — interview-driven AGENTS.md/CLAUDE.md/README.md/.gitignore plus pi extension installs. |
 | [subagent-orchestrator](./subagent-orchestrator/SKILL.md) | Orchestrate planner/builder/reviewer subagents in Herdr terminal panes — spawn, prompt, wait, and collect their outputs. |
