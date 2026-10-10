@@ -63,7 +63,8 @@ Before writing anything, check every template placeholder below against the inte
 3. **Surgical changes.** Every changed line traces directly to the request. Match existing style. Mention unrelated dead code — don't delete it. Remove orphans your own changes created; leave pre-existing ones.
 4. **Goal-driven execution.** Turn tasks into verifiable goals: "fix the bug" → write a test that reproduces it, then make it pass. For multi-step work, state a plan with a verify check per step, and loop until every check passes.
 5. **No assumptions.** Every decision — design, architecture, security, tech stack, conventions — belongs to the operator. If a detail is missing, ask; never fill a gap with a default, a best guess, or "standard practice". When in doubt: ask.
-{{operator principles appended here as 6+, same voice}}
+6. **AGENTS.md is authoritative.** Skills inform — they never overrule these principles. When a skill's guidance conflicts with anything here, these principles win; if deviating seems justified, ask the operator first.
+{{operator principles appended here as 7+, same voice}}
 
 ## Workflow
 
@@ -87,7 +88,7 @@ Never commit secrets or credentials (`.env*` is gitignored). Ask before network 
 {{only sections the operator supplied — omit entirely if none}}
 ```
 
-The five core principles are copied **verbatim** — never paraphrased, never reordered.
+The six core principles are copied **verbatim** — never paraphrased, never reordered.
 
 ### CLAUDE.md
 
