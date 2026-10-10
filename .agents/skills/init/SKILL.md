@@ -5,19 +5,23 @@ description: Bootstrap a repo for agentic coding — interviews the operator, th
 
 # Init
 
-Bootstrap a repository for agentic coding. **Interview first, never assume** — write nothing until the operator has answered. Keep every generated file as short as its job allows; AGENTS.md is loaded into context constantly, so low token count is a hard requirement.
+Bootstrap a repository for agentic coding. Keep every generated file as short as its job allows; AGENTS.md is loaded into context constantly, so low token count is a hard requirement.
+
+## 0. No assumptions
+
+Every decision belongs to the operator: design, architecture, security, tech stack, conventions, workflow, tooling. If a required detail is missing, **ask** — never fill a gap with a default, a best guess, or "standard practice". Reading facts from the repo (e.g. manifest scripts) is fine; choosing anything is not. The only defaults permitted are the ones this skill explicitly offers (the security one-liner, the workflow loop, the .gitignore entries), and each is **offered** first, never applied silently. "You decide" or silence from the operator is not an answer — re-ask with concrete options. When in doubt: ask.
 
 ## 1. Interview
 
-Ask all of this in **one pass**; follow up only where an answer is vague.
+Ask all of this in **one pass**; then follow up on **every** answer that is vague, partial, or missing — a vague answer is a follow-up question, not an invitation to infer.
 
 1. **Tech stack** — languages, framework, package manager, plus any **non-standard commands** (non-default package manager, unusual test invocation, monorepo task runner). Feeds the .gitignore, the README quickstart, and the AGENTS.md Commands section. Standard commands are inferable from the manifest — only capture what would surprise an agent, and cross-check it against the stack.
 2. **What is this repo for?** — 2–3 sentences for the AGENTS.md "What this repo is" section.
 3. **Coding conventions** — only repo-specific rules an agent would otherwise get wrong. Generic advice ("write clean code") is noise; omit.
 4. **Security** — if the operator offers nothing, propose the default below and let them decline.
-5. **Architecture** — only if it changes how an agent should work (module boundaries, key directories).
+5. **Architecture & design** — module boundaries, key directories, patterns the agent must respect. Always ask; record only what the operator states — nothing inferred.
 6. **Agentic method** — offer: (a) vibe coding, (b) spec-driven development, (c) not sure.
-   - (b): recommend `npm install -g @fission-ai/openspec@latest`, but **confirm first** — the operator may prefer another SDD framework.
+   - (b): recommend `npm install -g @fission-ai/openspec@latest`, but **confirm first** — the operator may prefer another SDD framework. Once installed, OpenSpec's own setup choices (`openspec init` prompts, conventions, directory layout) are operator decisions too — ask before running anything; don't choose for them.
    - (c): offer Matt Pockock's skills as the non-vibe default.
    - Offer Matt Pockock's skills **even when SDD is chosen** — `npx skills add mattpocock/skills`; the operator picks which skills to install.
 7. **Monorepo?** — if yes, keep the root AGENTS.md lean and remind the operator they can add a nested AGENTS.md per package later (the nearest one in the tree takes precedence). Do not interview per package in this run.
@@ -45,6 +49,8 @@ Append `-l` to every command for project scope.
 
 ## 3. Generate files
 
+Before writing anything, check every template placeholder below against the interview answers. If any decision is still unanswered, **stop and ask** — do not write around it, and do not fill it in yourself. Every line in every generated file must trace to an operator answer or a default the operator accepted.
+
 ### AGENTS.md
 
 ```markdown
@@ -56,7 +62,8 @@ Append `-l` to every command for project scope.
 2. **Simplicity first.** Minimum code that solves the problem. No unasked features, single-use abstractions, unrequested configurability, or error handling for impossible cases. If 200 lines could be 50, rewrite.
 3. **Surgical changes.** Every changed line traces directly to the request. Match existing style. Mention unrelated dead code — don't delete it. Remove orphans your own changes created; leave pre-existing ones.
 4. **Goal-driven execution.** Turn tasks into verifiable goals: "fix the bug" → write a test that reproduces it, then make it pass. For multi-step work, state a plan with a verify check per step, and loop until every check passes.
-{{operator principles appended here as 5+, same voice}}
+5. **No assumptions.** Every decision — design, architecture, security, tech stack, conventions — belongs to the operator. If a detail is missing, ask; never fill a gap with a default, a best guess, or "standard practice". When in doubt: ask.
+{{operator principles appended here as 6+, same voice}}
 
 ## Workflow
 
@@ -80,7 +87,7 @@ Never commit secrets or credentials (`.env*` is gitignored). Ask before network 
 {{only sections the operator supplied — omit entirely if none}}
 ```
 
-The four core principles are copied **verbatim** — never paraphrased, never reordered.
+The five core principles are copied **verbatim** — never paraphrased, never reordered.
 
 ### CLAUDE.md
 
@@ -111,5 +118,6 @@ Unconditional first line: `.env*`. Then the stack's minimal entries — Node: `n
 ## 4. Verify
 
 - Re-read every file written. Confirm CLAUDE.md imports AGENTS.md, .gitignore covers the stack's artifacts plus `.env*`, and the commands match the stack.
+- **Traceability audit:** scan every generated file for content that cannot be traced to an operator answer or an accepted default. If any is found, ask the operator about it and revise — an assumption that already reached disk is still an assumption.
 - Run `pi list` and confirm the extensions installed at the chosen scope.
 - Report a summary: files created/merged, extensions installed, and any commands the operator still needs to run manually (failed installs, Tavily key, OpenSpec or skills installs they deferred).
