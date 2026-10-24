@@ -25,7 +25,8 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
    - (c): offer Matt Pockock's skills as the non-vibe default.
    - Offer Matt Pockock's skills **even when SDD is chosen** — `npx skills add mattpocock/skills`; the operator picks which skills to install.
 7. **Monorepo?** — if yes, keep the root AGENTS.md lean and remind the operator they can add a nested AGENTS.md per package later (the nearest one in the tree takes precedence). Do not interview per package in this run.
-8. **Additional principles** — appended after the four core principles, same voice.
+8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, git, security by default). If yes, record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md. Role provisioning itself is machine-global — see §2.5.
+9. **Additional principles** — appended after the four core principles, same voice.
 
 Also ask:
 
@@ -46,6 +47,16 @@ Install each after explicit confirmation. If a command fails (sandboxed, no netw
 - `pi install npm:@tavily/pi-extension` — needs a `TAVILY_API_KEY`. If the `wizard` skill is installed, generate a one-stage wizard for the key (hidden entry, `.env` upsert); otherwise print the setup instructions. Never block on it
 
 Append `-l` to every command for project scope.
+
+`pi install npm:pi-herdr-agents` is **user-level (no `-l`)**: it is an execution host for Herdr subagents, requested only when the operator answered yes to sub-agents in §1.8, and installed only if `pi list` does not already show it.
+
+### 2.5 Role provisioning (machine-global)
+
+Subagent roles live in `$PI_CODING_AGENT_DIR/agents/` (default `~/.pi/agent/agents/`), not in the repo. Run this at most once per machine:
+
+- If a role catalog already exists there, **do not** offer to overwrite it — report what is installed and move on.
+- If the directory has no roles, offer the default catalog **wholesale** (show the full table: role, responsibility, model, thinking). Only if declined, interview per-role for models and thinking.
+- Default catalog: `plan` (glm-5.3-flash, medium), `code` (deepseek-v4.1-flash, high), `review` (minimax-m3, high), `git` (deepseek-v4.1-flash, medium), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files.
 
 ## 3. Generate files
 

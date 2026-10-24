@@ -34,17 +34,18 @@ npx skills update -y
 
 ## Prerequisites
 
-[`subagent-orchestrator`](./subagent-orchestrator/SKILL.md) drives the [Herdr](https://github.com/herdrdev/herdr) CLI and defers all command syntax to the `herdr` skill, so install that first:
+[`subagent-orchestrator`](./subagent-orchestrator/SKILL.md) and [`dev-workflow`](./dev-workflow/SKILL.md) delegate through the [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-herdr-agents) extension — install it with `pi install npm:pi-herdr-agents`. They also require the `herdr` skill:
 
 ```bash
 npx skills add herdrdev/herdr
 ```
 
-It also needs to run inside a Herdr pane (`HERDR_ENV=1`). Without the skill installed, `herdr --skill` prints the same reference content.
+Both must run inside a Herdr pane (`HERDR_ENV=1`). The roles they launch are defined in `~/.pi/agent/agents/` (or the project's `.pi/agents/`); `init` provisions them.
 
 ## Skills in this repo
 
 | Skill | Description |
 |-------|-------------|
-| [init](./init/SKILL.md) | Bootstrap a repo for agentic coding — interview-driven AGENTS.md/CLAUDE.md/README.md/.gitignore plus pi extension installs. |
-| [subagent-orchestrator](./subagent-orchestrator/SKILL.md) | Orchestrate planner/builder/reviewer subagents in Herdr terminal panes — spawn, prompt, wait, and collect their outputs. |
+| [dev-workflow](./dev-workflow/SKILL.md) | Enforced coding workflow — plan (openspec or grill-with-docs), plan and code review cycles, git check-in, each phase run by a subagent role. |
+| [init](./init/SKILL.md) | Bootstrap a repo for agentic coding — interview-driven AGENTS.md/CLAUDE.md/README.md/.gitignore plus pi extension installs, and optional subagent role provisioning. |
+| [subagent-orchestrator](./subagent-orchestrator/SKILL.md) | Delegate to subagent roles (plan, code, review, git, security) via the pi-herdr-agents extension in Herdr terminal panes — the role catalog and delegation policy. |

@@ -19,6 +19,11 @@
       "skillPath": "skills/engineering/codebase-design/SKILL.md",
       "computedHash": "b2888e4f4e8c0af3bfd557575a64b905c44e6248c3101d72077816882b3a92b9"
     },
+    "dev-workflow": {
+      "source": "./skills",
+      "sourceType": "local",
+      "computedHash": "96caa78bedb1715dd3154cfb1b68995b2037e891d5c9858b2bf214d50981c1ab"
+    },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
       "sourceType": "github",
