@@ -1,47 +1,53 @@
 ---
 name: subagent-orchestrator
-description: Use when the user wants work delegated to a subagent, a specialized persona (planner, builder, reviewer), or several tasks run in parallel in visible terminal panes. Requires the herdr skill and HERDR_ENV=1.
+description: Use when the user wants work delegated to a subagent, a specialized persona (planner, coder, reviewer, git, security), or several tasks run in parallel in visible terminal panes. Requires the pi-herdr-agents extension, the herdr skill, and HERDR_ENV=1.
 ---
 
 # Subagent Orchestrator
 
-Policy for delegating work to subagents running in Herdr panes beside you. The **herdr skill** is the authority for every command, flag, lifecycle state, and error code, and its Safety and coordination rules bind here. Load it before your first control command; `herdr --skill` prints the same content when the skill is not installed.
+Policy for delegating work to subagents running in Herdr panes beside you.
+
+**Mechanism:** the `pi-herdr-agents` extension (https://github.com/giuseppecrj/pi-herdr-agents) is the only subagent mechanism — never raw `herdr` CLI commands. Its skill, `pi-herdr-agents`, is the authority for launching, waiting, lifecycle states, interruption, cancellation, model routing, and worktrees; its rules bind here. Load it before your first subagent call.
 
 If `HERDR_ENV=1` is unset, stop and tell the user you must be inside a Herdr pane.
+
+## Core mechanism rules
+
+These are the rules most often violated; the extension skill carries the full set.
+
+- **Never poll.** `subagent` returns an acknowledgement; results arrive automatically as a `subagent_result` message that starts a new turn. No sleep, no tailing, no status checks.
+- **Never close panes or kill processes by hand.** A vanished pane can trigger a fallback replacement run that keeps cancelled work going. Use `subagent_cancel` (ordinary children) or `subagent_stop` (persistent specialists).
+- **Set model and thinking explicitly** on every orchestrated child — omitting inherits the parent runtime, which is a discouraged fallback.
+- **Children are leaves by default.** They never push, merge, deploy, or orchestrate further agents unless the task explicitly authorizes it. The parent owns integration, verification, and cleanup.
 
 ## Delegate or do it myself
 
 Delegate when the work is genuinely parallel, wants its own clean context (a reviewer of a diff you just wrote), or is bulk mechanical work. Do it myself when it needs this conversation's context or is a single small edit — coordination then costs more than the work.
 
-Ask the user before going past two agents, and surface any substitution of a persona's model as a decision for them rather than making it silently.
+Ask the user before going past two agents, and surface any substitution of a role's model as a decision for them rather than making it silently.
 
-## Personas
+## Roles
 
-Each persona has a fixed pi model, all through the `opencode-go` provider:
+Named roles resolve from `~/.pi/agent/agents/` (global) or the project's `.pi/agents/`. `subagents_list` shows what is visible. Each role has a bounded responsibility:
 
-- **Planner** — requirements in, step-by-step Markdown checklist out, no code. `opencode-go/glm-5.2`.
-- **Builder** — checklist in, working code out, with the repo's checks run. `opencode-go/deepseek-v4.1-flash`.
-- **Reviewer** — file or diff in, actionable findings out with evidence quoted, no rewrites. `opencode-go/minimax-m3`.
+| Role | Responsibility | Model (frontmatter) |
+| --- | --- | --- |
+| `plan` | Settled requirements → step-by-step Markdown plan, no code | `opencode-go/glm-5.3-flash` |
+| `code` | Plan/spec → working code with repo checks run | `opencode-go/deepseek-v4.1-flash` |
+| `review` | Diff/file/plan → findings with evidence and severity | `opencode-go/minimax-m3` |
+| `git` | Verify, commit, report SHA — no push, no PR | `opencode-go/deepseek-v4.1-flash` |
+| `security` | Security/pentest analysis with exploit conditions | `opencode-go/glm-5.2` |
 
-## Lifecycle
+Tier overrides, passed as the `model` argument at launch:
 
-Each step ends on a completion criterion; herdr's JSON responses are the evidence.
+- **plan, complex work** — the user must say the work is complex; regular planning is the default. Override to `opencode-go/glm-5.3` (with `thinking: high`).
+- **security** — `glm-5.2` is the default; ask the user once per session whether this session's security work uses `glm-5.3` instead.
 
-1. **Split a sibling pane.** Done when you hold the new pane ID parsed from the response.
-2. **Start a uniquely named agent** — persona plus slice, as in `reviewer-api` and `reviewer-spec`. Done when herdr reports the agent ready; when it reports the agent is not ready, wait for idle rather than starting over.
-3. **Prompt with everything it cannot discover** — persona, exact goal, paths, the diff, the constraints in `AGENTS.md`, and the output format and length. Done when the prompt is accepted and the agent shows activity.
-4. **Wait, then read.** A bare `agent wait` already covers every settled state; adding `--until` narrows it and can hang past a finished agent. Read the agent's output rather than the pane — when a response outruns the scrollback, ask that agent to write Markdown to a temp path and read the file.
-5. **Collect and close.** Done when the user has the digest, and the panes this skill created are closed if the history is not wanted.
+Launch names as `<task>-<role>[-n]` (e.g. `reviewer-api`, `reviewer-spec`).
 
-For parallel work, send the prompts without waiting, then wait on every agent before reading any of them.
+## Prompting
 
-## Failure handling
-
-Inspect state before acting: a timeout does not prove the prompt was never delivered, so a resend duplicates paid work.
-
-- **blocked** — the agent sits at an approval or question dialog, and herdr rejects prompts sent to it. Surface the dialog to the user and let them answer.
-- **stalled or timed out** — read the agent to see what it actually did before touching it again.
-- **failed or unexpected output** — report it, quoting the agent, rather than respawning.
+Prompt with everything the child cannot discover: the role's job, the exact goal, paths, the diff or artifacts, the constraints in AGENTS.md, and the output format and length. For parallel work, send the prompts without waiting, then let the results arrive.
 
 ## Reporting back
 

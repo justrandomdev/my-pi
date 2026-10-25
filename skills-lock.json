@@ -81,7 +81,7 @@
     "init": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "06247f69c5509427394d0b4b34dc3e2818300ed7ea6c4dd37e28118ac3e8f177"
+      "computedHash": "b595e81c2ba1c345d05c89fdd14608ec93fa5c282da05c7847789809c7edfdf2"
     },
     "pr": {
       "source": "mattpocock/skills",
@@ -116,7 +116,7 @@
     "subagent-orchestrator": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "c96cdae4f84a02d6d1599320d3823360f030190ee7ff2a967e662c9b634f5bab"
+      "computedHash": "cb315c38bda80c8c2c5edcd1ac918cf515489f014f8e111649eca0032f38ceb8"
     },
     "tdd": {
       "source": "mattpocock/skills",
