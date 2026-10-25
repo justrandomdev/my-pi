@@ -12,6 +12,8 @@ npx skills add justrandomdev/my-pi/skills -s init
 
 Run it from the repo you want to bootstrap and answer the interview.
 
+When you opt into sub-agents during the interview, `init` also installs the [`dev-workflow`](./skills/dev-workflow/SKILL.md) and [`subagent-orchestrator`](./skills/subagent-orchestrator/SKILL.md) skills with their prerequisites — no manual install needed. Skipping init? Same install, any time before your first delegation task: `npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator`.
+
 ## Skills
 
 The skills catalog lives in [skills/README.md](./skills/README.md), with management commands (`npx skills add ./skills`, `update`, `remove`).

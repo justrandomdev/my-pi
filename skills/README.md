@@ -32,15 +32,22 @@ npx skills update -y
 
 `npx skills add ./skills -y` installs to all detected agents at once; add `-a claude-code` (etc.) to target specific ones. Run `npx skills ls` to see what's installed and where.
 
-## Prerequisites
+## Installing the subagent skills
 
-[`subagent-orchestrator`](./subagent-orchestrator/SKILL.md) and [`dev-workflow`](./dev-workflow/SKILL.md) delegate through the [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-herdr-agents) extension — install it with `pi install npm:pi-herdr-agents`. They also require the `herdr` skill:
+You normally do **not** install [`subagent-orchestrator`](./subagent-orchestrator/SKILL.md) and [`dev-workflow`](./dev-workflow/SKILL.md) by hand: `init` installs both (plus their `herdr` prerequisite skill) automatically when you answer yes to sub-agents in its interview.
+
+Skipping init, or adding them to a repo init already set up? Run this from the target repo, any time before your first task that delegates to a subagent — before or after init otherwise makes no difference:
 
 ```bash
-npx skills add herdrdev/herdr
+npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator
 ```
 
-Both must run inside a Herdr pane (`HERDR_ENV=1`). The roles they launch are defined in `~/.pi/agent/agents/` (or the project's `.pi/agents/`); `init` provisions them.
+### Prerequisites (init installs these too)
+
+- The [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-herdr-agents) extension — `pi install npm:pi-herdr-agents` (user-level).
+- The `herdr` skill — `npx skills add herdrdev/herdr`.
+- Both skills must run inside a Herdr pane (`HERDR_ENV=1`).
+- The roles they launch live in `~/.pi/agent/agents/` (or the project's `.pi/agents/`); `init` provisions them (§2.5 of its SKILL.md).
 
 ## Skills in this repo
 

@@ -25,7 +25,11 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
    - (c): offer Matt Pockock's skills as the non-vibe default.
    - Offer Matt Pockock's skills **even when SDD is chosen** — `npx skills add mattpocock/skills`; the operator picks which skills to install.
 7. **Monorepo?** — if yes, keep the root AGENTS.md lean and remind the operator they can add a nested AGENTS.md per package later (the nearest one in the tree takes precedence). Do not interview per package in this run.
-8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, git, security by default). If yes, record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md. Role provisioning itself is machine-global — see §2.5.
+8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, git, security by default). If yes:
+   - Install the workflow skills now (project-level): `npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator` — and confirm the output lists both skills. Also install the `herdr` prerequisite skill if it is not installed globally (`npx skills add herdrdev/herdr`).
+   - Record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md.
+
+   Role provisioning itself is machine-global — see §2.5.
 9. **Additional principles** — appended after the four core principles, same voice.
 
 Also ask:
