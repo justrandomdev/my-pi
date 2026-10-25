@@ -24,9 +24,11 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
    - (b): recommend `npm install -g @fission-ai/openspec@latest`, but **confirm first** — the operator may prefer another SDD framework. Once installed, OpenSpec's own setup choices (`openspec init` prompts, conventions, directory layout) are operator decisions too — ask before running anything; don't choose for them.
    - (c): offer Matt Pockock's skills as the non-vibe default.
    - Offer Matt Pockock's skills **even when SDD is chosen** — `npx skills add mattpocock/skills`; the operator picks which skills to install.
+   - **Skill dependencies have no formal metadata** — a skill's body may invoke others by name (e.g. `grill-with-docs` says to call the Skill tool for `grilling` and `domain-modeling`; those two have no further skill dependencies, verified). After installing any skills, scan each installed skill's body for `Call the Skill tool` / skill-name pointers, and install any referenced skills that are not already installed (same source repo).
 7. **Monorepo?** — if yes, keep the root AGENTS.md lean and remind the operator they can add a nested AGENTS.md per package later (the nearest one in the tree takes precedence). Do not interview per package in this run.
 8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, git, security by default). If yes:
    - Install the workflow skills now (project-level): `npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator` — and confirm the output lists both skills. Also install the `herdr` prerequisite skill if it is not installed globally (`npx skills add herdrdev/herdr`).
+   - `dev-workflow`'s plan phase invokes `grill-with-docs`; if it is not installed, offer to install it with its dependencies (`npx skills add mattpocock/skills -s grill-with-docs,grilling,domain-modeling`).
    - Record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md.
 
    Role provisioning itself is machine-global — see §2.5.
