@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "agent-issue-tracker": {
+      "source": "./skills",
+      "sourceType": "local",
+      "computedHash": "1dbc05cec9784442ebf52fa492b9fb3e39b0adc16c6eb3565eb3d55fd5731518"
+    },
     "ask-matt": {
       "source": "mattpocock/skills",
       "sourceType": "github",
