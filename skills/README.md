@@ -53,6 +53,6 @@ npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator
 
 | Skill | Description |
 |-------|-------------|
-| [dev-workflow](./dev-workflow/SKILL.md) | Enforced coding workflow — plan (openspec or grill-with-docs), plan and code review cycles, git check-in, each phase run by a subagent role. |
+| [dev-workflow](./dev-workflow/SKILL.md) | Enforced coding workflow — plan (openspec or grill-with-docs), plan and code review cycles, git check-in, each phase run by a subagent role; the orchestrating agent implements nothing. |
 | [init](./init/SKILL.md) | Bootstrap a repo for agentic coding — interview-driven AGENTS.md/CLAUDE.md/README.md/.gitignore plus pi extension installs, and optional subagent role provisioning. |
-| [subagent-orchestrator](./subagent-orchestrator/SKILL.md) | Delegate to subagent roles (plan, code, review, git, security) via the pi-herdr-agents extension in Herdr terminal panes — the role catalog and delegation policy. |
+| [subagent-orchestrator](./subagent-orchestrator/SKILL.md) | Delegate to subagent roles (plan, code, review, git, security) via the pi-herdr-agents extension in Herdr terminal panes — the role catalog and delegation policy; the orchestrator implements nothing. |

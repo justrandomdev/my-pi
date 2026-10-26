@@ -17,12 +17,14 @@ These are the rules most often violated; the extension skill carries the full se
 
 - **Never poll.** `subagent` returns an acknowledgement; results arrive automatically as a `subagent_result` message that starts a new turn. No sleep, no tailing, no status checks.
 - **Never close panes or kill processes by hand.** A vanished pane can trigger a fallback replacement run that keeps cancelled work going. Use `subagent_cancel` (ordinary children) or `subagent_stop` (persistent specialists).
-- **Set model and thinking explicitly** on every orchestrated child — omitting inherits the parent runtime, which is a discouraged fallback.
+- **Set model and thinking explicitly** on every orchestrated child with no role frontmatter for them — omitting uses the role's frontmatter model and `thinking` when set, and only inherits the parent level when the role sets neither (discouraged).
 - **Children are leaves by default.** They never push, merge, deploy, or orchestrate further agents unless the task explicitly authorizes it. The parent owns integration, verification, and cleanup.
 
-## Delegate or do it myself
+## The orchestrator implements nothing (hard rule)
 
-Delegate when the work is genuinely parallel, wants its own clean context (a reviewer of a diff you just wrote), or is bulk mechanical work. Do it myself when it needs this conversation's context or is a single small edit — coordination then costs more than the work.
+You converse and coordinate; you never implement. Every artifact — plans, specs and their fixes, ADRs and glossary entries, code, commits — is written by a child role. There is no "too small to delegate" exception: if work needs this conversation's context, brief a child with that context instead of doing it yourself.
+
+Interviews are conversation, not implementation. You may interview the user and relay answers, but every resulting artifact belongs to the role that owns it: the `plan` agent writes and revises plans and spec documentation (including fixes from review feedback), the `code` agent implements and fixes code, the `git` agent commits. When a child needs a user decision mid-task it calls `caller_ping`; ask the user, then answer with `subagent_resume` (ordinary child) or `subagent_send` (persistent specialist).
 
 Ask the user before going past two agents, and surface any substitution of a role's model as a decision for them rather than making it silently.
 
@@ -32,7 +34,7 @@ Named roles resolve from `~/.pi/agent/agents/` (global) or the project's `.pi/ag
 
 | Role | Responsibility | Model (frontmatter) |
 | --- | --- | --- |
-| `plan` | Settled requirements → step-by-step Markdown plan, no code | `opencode-go/glm-5.3-flash` |
+| `plan` | Settled requirements → Markdown plan and spec docs, including fixes from review feedback; no code | `opencode-go/glm-5.3-flash` |
 | `code` | Plan/spec → working code with repo checks run | `opencode-go/deepseek-v4.1-flash` |
 | `review` | Diff/file/plan → findings with evidence and severity | `opencode-go/minimax-m3` |
 | `git` | Verify, commit, report SHA — no push, no PR | `opencode-go/deepseek-v4.1-flash` |

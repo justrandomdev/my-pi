@@ -62,7 +62,7 @@ Subagent roles live in `$PI_CODING_AGENT_DIR/agents/` (default `~/.pi/agent/agen
 
 - If a role catalog already exists there, **do not** offer to overwrite it — report what is installed and move on.
 - If the directory has no roles, offer the default catalog **wholesale** (show the full table: role, responsibility, model, thinking). Only if declined, interview per-role for models and thinking.
-- Default catalog: `plan` (glm-5.3-flash, medium), `code` (deepseek-v4.1-flash, high), `review` (minimax-m3, high), `git` (deepseek-v4.1-flash, medium), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files.
+- Default catalog: `plan` (glm-5.3-flash, high), `code` (deepseek-v4.1-flash, high), `review` (minimax-m3, high), `git` (deepseek-v4.1-flash, low), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files. Verify each frontmatter `thinking` level is in the model's supported range — `glm-5.3-flash` supports only `low`/`high`/`max` and `deepseek-v4.1-flash` only `off`/`low`/`high`/`max`, so `medium` is invalid for both. The `plan` role also revises plans and spec documents from review feedback, so its tool allowlist includes `write` and `edit`.
 
 ## 3. Generate files
 
