@@ -39,6 +39,7 @@ Named roles resolve from `~/.pi/agent/agents/` (global) or the project's `.pi/ag
 | `review` | Diff/file/plan → findings with evidence and severity | `opencode-go/minimax-m3` |
 | `git` | Verify, commit, report SHA — no push, no PR | `opencode-go/deepseek-v4.1-flash` |
 | `security` | Security/pentest analysis with exploit conditions | `opencode-go/glm-5.2` |
+| `deep-thinking` | Hard diagnosis and architecture analysis — what resisted the first pass | `opencode-go/glm-5.3` |
 
 Tier overrides, passed as the `model` argument at launch:
 

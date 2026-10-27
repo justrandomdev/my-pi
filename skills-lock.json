@@ -27,7 +27,7 @@
     "dev-workflow": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "bbb032c64f0b26403ae220af656aa49a448905afdd108330c0fca20c2740d4e3"
+      "computedHash": "a5e20c1bfb3d05cbbebf37fd5826772598e3dd58dc52801737046bf1c254a612"
     },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
@@ -86,7 +86,7 @@
     "init": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "97256f55e155a32a6fc6b665b3382722d79fd1d2d23837143991634b85c8f826"
+      "computedHash": "78b978ad4a74fd250464bcffdbe1d91fc207f4a9ddb04917d4c7f5702137be30"
     },
     "pr": {
       "source": "mattpocock/skills",
@@ -121,7 +121,7 @@
     "subagent-orchestrator": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "c7648268a630d687e080019f81d7e11a4798b5ef0c0993d95c3af487f201efe1"
+      "computedHash": "eb49fdb7e6519ac0825ebd8f7712c3e6351afd3e5b92916c9bb77ca937a8972a"
     },
     "tdd": {
       "source": "mattpocock/skills",
