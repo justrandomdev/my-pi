@@ -26,7 +26,7 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
    - Offer Matt Pockock's skills **even when SDD is chosen** — `npx skills add mattpocock/skills`; the operator picks which skills to install.
    - **Skill dependencies have no formal metadata** — a skill's body may invoke others by name (e.g. `grill-with-docs` says to call the Skill tool for `grilling` and `domain-modeling`; those two have no further skill dependencies, verified). After installing any skills, scan each installed skill's body for `Call the Skill tool` / skill-name pointers, and install any referenced skills that are not already installed (same source repo).
 7. **Monorepo?** — if yes, keep the root AGENTS.md lean and remind the operator they can add a nested AGENTS.md per package later (the nearest one in the tree takes precedence). Do not interview per package in this run.
-8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, git, security, deep-thinking by default). If yes:
+8. **Sub-agents** — ask whether this repo uses sub-agent delegation (roles: plan, code, review, final-pass-review, git, security, deep-thinking by default). If yes:
    - Install the workflow skills now (project-level): `npx skills add justrandomdev/my-pi/skills -s dev-workflow,subagent-orchestrator` — and confirm the output lists both skills. Also install the `herdr` prerequisite skill if it is not installed globally (`npx skills add herdrdev/herdr`).
    - `dev-workflow`'s plan phase invokes `grill-with-docs`; if it is not installed, offer to install it with its dependencies (`npx skills add mattpocock/skills -s grill-with-docs,grilling,domain-modeling`).
    - Record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md.
@@ -62,7 +62,7 @@ Subagent roles live in `$PI_CODING_AGENT_DIR/agents/` (default `~/.pi/agent/agen
 
 - If a role catalog already exists there, **do not** offer to overwrite it — report what is installed and move on.
 - If the directory has no roles, offer the default catalog **wholesale** (show the full table: role, responsibility, model, thinking). Only if declined, interview per-role for models and thinking.
-- Default catalog: `plan` (glm-5.3-flash, high), `code` (deepseek-v4.1-flash, high), `review` (minimax-m3, high), `git` (deepseek-v4.1-flash, low), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file), `deep-thinking` (glm-5.3, high; offer `kimi-k3.1-pro` as the alternative and install the operator's choice). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files. Verify each frontmatter `thinking` level is in the model's supported range — `glm-5.3-flash` supports only `low`/`high`/`max` and `deepseek-v4.1-flash` only `off`/`low`/`high`/`max`, so `medium` is invalid for both. The `plan` role also revises plans and spec documents from review feedback, so its tool allowlist includes `write` and `edit`.
+- Default catalog: `plan` (glm-5.3-flash, high), `code` (deepseek-v4.1-flash, high), `review` (deepseek-v4-flash, high), `final-pass-review` (minimax-m3, high), `git` (deepseek-v4.1-flash, low), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file), `deep-thinking` (glm-5.3, high; offer `kimi-k3.1-pro` as the alternative and install the operator's choice). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files. Verify each frontmatter `thinking` level is in the model's supported range — `glm-5.3-flash` supports only `low`/`high`/`max` and `deepseek-v4.1-flash` only `off`/`low`/`high`/`max`, so `medium` is invalid for both. The `plan` role also revises plans and spec documents from review feedback, so its tool allowlist includes `write` and `edit`.
 
 ## 3. Generate files
 
@@ -85,7 +85,7 @@ Before writing anything, check every template placeholder below against the inte
 
 ## Workflow
 
-Every task follows **plan → build (including tests) → review → commit**. A task isn't done until its verify check passes. {{Or the operator's modified loop}}
+Every task follows **plan → build (including tests) → review → final-pass review → commit**. The `review` role cycles until only low findings remain; the `final-pass-review` role then runs one or two final rounds. A task isn't done until its verify check passes. {{Or the operator's modified loop}}
 
 ## What this repo is
 

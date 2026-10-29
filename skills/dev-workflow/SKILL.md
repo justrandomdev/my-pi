@@ -26,6 +26,7 @@ Hand the plan to the **`review`** role.
 - **Automatically fix** every medium, high, and critical finding; low findings wait for the user's call. Plan and spec fixes are made by the **`plan`** agent — relaunch it (or resume its session) with the review report as the task; never fix anything yourself — then the plan is reviewed again.
 - After each plan-review cycle, ask the user whether to continue cycling.
 - **Cap: 5 fix-and-re-review cycles.** At the cap without a clean or user-accepted report, stop cycling and report to the user: why so many cycles were needed (the recurring findings across the reports), what remains outstanding, and ask how to proceed — continue cycling or their other instructions.
+- When a report leaves only low findings, the `review` cycle is done. Then hand the plan to the **`final-pass-review`** role for one or two final rounds (fresh eyes on what the cycle normalized). Anything above low it finds re-enters the fix-and-re-review loop; otherwise the plan is done.
 
 The user is happy with the plan when they say so — accepted flaws count as happy.
 
@@ -38,7 +39,7 @@ Hand the plan to the **`code`** role.
 
 ## 4. Code review cycle
 
-Hand the diff to the **`review`** role. Same rules as phase 2, five-cycle cap included: show the report, auto-fix medium and above — fixes by the **`code`** agent, never by you — re-review after fixes, ask the user after each cycle.
+Hand the diff to the **`review`** role. Same rules as phase 2, five-cycle cap and the two-stage finish included: cycle the report, fixing mediums and above with the **`code`** agent, until only lows remain — then one or two **`final-pass-review`** rounds; anything above low they find re-enters the fix-and-re-review loop. Ask the user after each cycle.
 
 ## 5. Check in
 

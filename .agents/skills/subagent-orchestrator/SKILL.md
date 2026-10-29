@@ -36,7 +36,8 @@ Named roles resolve from `~/.pi/agent/agents/` (global) or the project's `.pi/ag
 | --- | --- | --- |
 | `plan` | Settled requirements → Markdown plan and spec docs, including fixes from review feedback; no code | `opencode-go/glm-5.3-flash` |
 | `code` | Plan/spec → working code with repo checks run | `opencode-go/deepseek-v4.1-flash` |
-| `review` | Diff/file/plan → findings with evidence and severity | `opencode-go/minimax-m3` |
+| `review` | Diff/file/plan → findings with evidence and severity; cycles until only low findings remain | `opencode-go/deepseek-v4-flash` |
+| `final-pass-review` | One or two last review rounds after `review` has converged to low-only findings | `opencode-go/minimax-m3` |
 | `git` | Verify, commit, report SHA — no push, no PR | `opencode-go/deepseek-v4.1-flash` |
 | `security` | Security/pentest analysis with exploit conditions | `opencode-go/glm-5.2` |
 | `deep-thinking` | Hard diagnosis and architecture analysis — what resisted the first pass | `opencode-go/glm-5.3` |

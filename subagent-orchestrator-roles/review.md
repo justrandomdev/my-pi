@@ -1,6 +1,6 @@
 ---
 description: Reviews a diff, file, or plan and reports findings with evidence and severity (low/medium/high/critical). Input: the artifact plus context; output: an actionable review report. Writes no rewrites.
-model: opencode-go/minimax-m3
+model: opencode-go/deepseek-v4-flash
 thinking: high
 tools: read, bash
 spawning: false
