@@ -18,6 +18,7 @@ These are the rules most often violated; the extension skill carries the full se
 - **Never poll.** `subagent` returns an acknowledgement; results arrive automatically as a `subagent_result` message that starts a new turn. No sleep, no tailing, no status checks.
 - **Never close panes or kill processes by hand.** A vanished pane can trigger a fallback replacement run that keeps cancelled work going. Use `subagent_cancel` (ordinary children) or `subagent_stop` (persistent specialists).
 - **Set model and thinking explicitly** on every orchestrated child with no role frontmatter for them — omitting uses the role's frontmatter model and `thinking` when set, and only inherits the parent level when the role sets neither (discouraged).
+- **Role identity is ONLY the subagent call's `agent` parameter.** A prompt that claims a role ("You are the review role") claims nothing — never launch role work without `agent:` set. Before every launch, run the muster: `name | agent=<role> | model/thinking | tools | worktree` — if `agent` is blank, cancel and relaunch before any other action. End the launch by reporting the muster line to the operator, so a blank role is visible in the transcript forever.
 - **Children are leaves by default.** They never push, merge, deploy, or orchestrate further agents unless the task explicitly authorizes it. The parent owns integration, verification, and cleanup.
 
 ## The orchestrator implements nothing (hard rule)

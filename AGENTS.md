@@ -27,6 +27,10 @@ Authoritative harness docs: `$(npm root -g)/@earendil-works/pi-coding-agent/docs
 - Extensions are plain TypeScript (jiti — no build step); don't add bundlers or compilers.
 - Extensions run with the user's permissions — no network, filesystem, or subprocess access beyond the plugin's function.
 
+## Sub-agents
+
+Role identity is the subagent call's `agent` parameter, not a prompt assert; a bare spawn is not a role, whatever its prompt says.
+
 ## Commands
 
 ```bash

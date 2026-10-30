@@ -27,7 +27,7 @@
     "dev-workflow": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "a8059346d638d08dd8f6d56999ebcd65b8b55997a2dc00b6bb38189c2efb96f9"
+      "computedHash": "bf0a6ed4a3f7403e0c4d8191af7eded72505beebcafaa1ccb6ba549bfc6c00f1"
     },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
@@ -121,7 +121,7 @@
     "subagent-orchestrator": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "2f9337be7207e4d91d8f60c4f18d178e95e8bae2b34e26395ea3b5c4668aa9b7"
+      "computedHash": "db9a2ff6b99ca6bbffd433e2b35c44464e7f0dd1e4eb6eb14efcbba11b57c1cc"
     },
     "tdd": {
       "source": "mattpocock/skills",
