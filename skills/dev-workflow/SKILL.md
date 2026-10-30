@@ -9,6 +9,14 @@ The enforced coding workflow. Every phase runs through a subagent role from `sub
 
 You orchestrate only: you interview the user, brief the roles, and relay reports. You implement nothing and write nothing — every write (plan, spec, ADR, code, fix, commit) is a role's write. `subagent-orchestrator`'s hard rule binds here.
 
+## Autonomy: decide vs. ask
+
+This workflow is autonomous by default. Run every step that has a clear rule through to the end; stop only at points where the decision is genuinely the operator's.
+
+- **Ask the user** when the call is theirs: interview questions, whether to accept a finding above low instead of fixing it, what to do about low findings, the 5-cycle cap decision, and anything beyond an ordinary commit in check-in.
+- **Never ask permission to continue.** When a step's exit condition is met, start the next step immediately and tell the user what you are doing — a status report is not a question, and flowing into the next phase is not a decision. Specifically: the moment the plan is done (final-pass-review clean, or the user accepted what remains), hand it straight to the `code` role — phase 3 starts on its own. The moment the code is done (final-pass-review clean or user-accepted), hand the work straight to the `git` role — phase 5 starts on its own. A phase passing final review is the end of *that* phase, never a place to end your turn waiting for a "go" the workflow never required.
+- Report genuinely important issues and operator decisions the moment they surface; don't batch them.
+
 ## 1. Plan
 
 Ask the user: openspec, or not?
@@ -24,11 +32,11 @@ Hand the plan to the **`review`** role.
 
 - Show the user the full review report — they decide whether to accept flaws or fix.
 - **Automatically fix** every medium, high, and critical finding; low findings wait for the user's call. Plan and spec fixes are made by the **`plan`** agent — relaunch it (or resume its session) with the review report as the task; never fix anything yourself — then the plan is reviewed again.
-- After each plan-review cycle, ask the user whether to continue cycling.
+- Do not pause between cycles to ask whether to continue — keep cycling until only lows remain, the user accepts findings, or the cap hits. Report each cycle's results as you go.
 - **Cap: 5 fix-and-re-review cycles.** At the cap without a clean or user-accepted report, stop cycling and report to the user: why so many cycles were needed (the recurring findings across the reports), what remains outstanding, and ask how to proceed — continue cycling or their other instructions.
 - When a report leaves only low findings, the `review` cycle is done. Then hand the plan to the **`final-pass-review`** role for one or two final rounds (fresh eyes on what the cycle normalized). Anything above low it finds re-enters the fix-and-re-review loop; otherwise the plan is done.
 
-The user is happy with the plan when they say so — accepted flaws count as happy.
+The user is happy with the plan when they say so — accepted flaws count as happy. A finished plan is a report and a handoff, not a stopping point: proceed directly into phase 3 without waiting for a go-ahead.
 
 ## 3. Code
 
@@ -39,7 +47,9 @@ Hand the plan to the **`code`** role.
 
 ## 4. Code review cycle
 
-Hand the diff to the **`review`** role. Same rules as phase 2, five-cycle cap and the two-stage finish included: cycle the report, fixing mediums and above with the **`code`** agent, until only lows remain — then one or two **`final-pass-review`** rounds; anything above low they find re-enters the fix-and-re-review loop. Ask the user after each cycle.
+Hand the diff to the **`review`** role. Same rules as phase 2, five-cycle cap and the two-stage finish included: cycle the report, fixing mediums and above with the **`code`** agent, until only lows remain — then one or two **`final-pass-review`** rounds; anything above low they find re-enters the fix-and-re-review loop. Do not pause between cycles to ask whether to continue — keep cycling until only lows remain or the cap hits, reporting results as you go.
+
+Check-in is the mandatory next step after a finished review cycle, taken autonomously — no go-ahead from the user first.
 
 ## 5. Check in
 

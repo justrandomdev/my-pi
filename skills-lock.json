@@ -27,7 +27,7 @@
     "dev-workflow": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "0ab0452abdc793823a9c61dfb2acdf526192a714325d998a93b862acf5f6ebe0"
+      "computedHash": "a8059346d638d08dd8f6d56999ebcd65b8b55997a2dc00b6bb38189c2efb96f9"
     },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
