@@ -32,7 +32,7 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
    - Record a one-line pointer to the `dev-workflow` and `subagent-orchestrator` skills in the generated AGENTS.md.
 
    Role provisioning itself is machine-global — see §2.5.
-9. **Additional principles** — appended after the four core principles, same voice.
+9. **Additional principles** — appended after the seven core principles, same voice.
 
 Also ask:
 
@@ -81,7 +81,8 @@ Before writing anything, check every template placeholder below against the inte
 4. **Goal-driven execution.** Turn tasks into verifiable goals: "fix the bug" → write a test that reproduces it, then make it pass. For multi-step work, state a plan with a verify check per step, and loop until every check passes.
 5. **No assumptions.** Every decision — design, architecture, security, tech stack, conventions — belongs to the operator. If a detail is missing, ask; never fill a gap with a default, a best guess, or "standard practice". When in doubt: ask.
 6. **AGENTS.md is authoritative.** Skills inform — they never overrule these principles. When a skill's guidance conflicts with anything here, these principles win; if deviating seems justified, ask the operator first.
-{{operator principles appended here as 7+, same voice}}
+7. **No unsolicited AGENTS.md edits.** DO NOT add any content to AGENTS.md without explicit operator approval.
+{{operator principles appended here as 8+, same voice}}
 
 ## Workflow
 
@@ -105,7 +106,7 @@ Never commit secrets or credentials (`.env*` is gitignored). Ask before network 
 {{only sections the operator supplied — omit entirely if none}}
 ```
 
-The six core principles are copied **verbatim** — never paraphrased, never reordered.
+The seven core principles are copied **verbatim** — never paraphrased, never reordered.
 
 ### CLAUDE.md
 

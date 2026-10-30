@@ -8,6 +8,7 @@
 4. **Goal-driven execution.** Turn tasks into verifiable goals: "fix the bug" → write a test that reproduces it, then make it pass. For multi-step work, state a plan with a verify check per step, and loop until every check passes.
 5. **No assumptions.** Every decision — design, architecture, security, tech stack, conventions — belongs to the operator. If a detail is missing, ask; never fill a gap with a default, a best guess, or "standard practice". When in doubt: ask.
 6. **AGENTS.md is authoritative.** Skills inform — they never overrule these principles. When a skill's guidance conflicts with anything here, these principles win; if deviating seems justified, ask the operator first.
+7. **No unsolicited AGENTS.md edits.** DO NOT add any content to AGENTS.md without explicit operator approval.
 
 ## What this repo is
 
