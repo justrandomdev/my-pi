@@ -33,6 +33,7 @@ Ask all of this in **one pass**; then follow up on **every** answer that is vagu
 
    Role provisioning itself is machine-global — see §2.5.
 9. **Additional principles** — appended after the seven core principles, same voice.
+10. **Knowledge base** — ask whether this repo will use a pi knowledge KB. Recommended for large repos; small ones rarely need one. If declined, skip §2.6 and omit the AGENTS.md Knowledge base section.
 
 Also ask:
 
@@ -63,6 +64,14 @@ Subagent roles live in `$PI_CODING_AGENT_DIR/agents/` (default `~/.pi/agent/agen
 - If a role catalog already exists there, **do not** offer to overwrite it — report what is installed and move on.
 - If the directory has no roles, offer the default catalog **wholesale** (show the full table: role, responsibility, model, thinking). Only if declined, interview per-role for models and thinking.
 - Default catalog: `plan` (glm-5.3-flash, high), `code` (deepseek-v4.1-flash, high), `review` (deepseek-v4-flash, high), `final-pass-review` (minimax-m3, high), `git` (deepseek-v4.1-flash, low), `security` (glm-5.2, high; glm-5.3 override is a per-launch decision, not a file), `deep-thinking` (glm-5.3, high; offer `kimi-k3.1-pro` as the alternative and install the operator's choice). Models are `provider/model-id` values from the `opencode-go` provider; verify they resolve before writing files. Verify each frontmatter `thinking` level is in the model's supported range — `glm-5.3-flash` supports only `low`/`high`/`max` and `deepseek-v4.1-flash` only `off`/`low`/`high`/`max`, so `medium` is invalid for both. The `plan` role also revises plans and spec documents from review feedback, so its tool allowlist includes `write` and `edit`.
+
+### 2.6 Knowledge base indexing (operator opted in via §1.10)
+
+A repo KB is added and indexed as part of init:
+
+1. Run `knowledge_plan` against the repo root — review scannable counts, suggested exclusions, and technical skips. Mandatory for large repos or any risky text (`.env`, credentials, `settings.json`, lockfiles, vendored text); show the operator the plan and let them confirm scope before indexing — especially anything the extension suggests excluding. Never silently include suggested-excluded text.
+2. Index with **one** `knowledge_add` call for the repo root, named `<repo-slug> repo`, letting the extension's default ignore rules apply (never index `node_modules/`, `dist/`, `build/`, caches, or other generated/runtime artifacts).
+3. Record the actual scope (what was indexed, what was excluded) in the AGENTS.md Knowledge base section; `knowledge_show` to confirm the KB is live.
 
 ## 3. Generate files
 
@@ -104,6 +113,13 @@ Never commit secrets or credentials (`.env*` is gitignored). Ask before network 
 ## Conventions / Gotchas
 
 {{only sections the operator supplied — omit entirely if none}}
+
+## Knowledge base
+
+{{omit entirely if the operator declined §1.10; otherwise, using the KB name and scope from §2.6}}
+
+- `{{KB name}}` (pi knowledge KB) mirrors this checkout — {{indexed scope, e.g. "code + docs, skills and build artifacts excluded"}}. Run `knowledge_search` / `knowledge_symbol_search` before manual greps or multi-file reads for domain questions (mode `fast` for exact symbols/errors, `adaptive` for implementation context).
+- Search results are snapshots: after structural changes land, refresh with `knowledge_update`
 ```
 
 The seven core principles are copied **verbatim** — never paraphrased, never reordered.
@@ -139,4 +155,5 @@ Unconditional first line: `.env*`. Then the stack's minimal entries — Node: `n
 - Re-read every file written. Confirm CLAUDE.md imports AGENTS.md, .gitignore covers the stack's artifacts plus `.env*`, and the commands match the stack.
 - **Traceability audit:** scan every generated file for content that cannot be traced to an operator answer or an accepted default. If any is found, ask the operator about it and revise — an assumption that already reached disk is still an assumption.
 - Run `pi list` and confirm the extensions installed at the chosen scope.
+- If §1.10 opted in, run `knowledge_show` and confirm the repo KB is live, and that the AGENTS.md Knowledge base section matches the actual scope.
 - Report a summary: files created/merged, extensions installed, and any commands the operator still needs to run manually (failed installs, Tavily key, OpenSpec or skills installs they deferred).

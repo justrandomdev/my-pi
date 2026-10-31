@@ -86,7 +86,7 @@
     "init": {
       "source": "./skills",
       "sourceType": "local",
-      "computedHash": "fbf4d60f080731ad68efc5ce0b0a4dec020cc77be9fc2bd2d1296230fd55299d"
+      "computedHash": "ca54a7e9b137fbeb96de87ba9b2df4c1c660b411f1781f34c6b9a817a20284a7"
     },
     "pr": {
       "source": "mattpocock/skills",
